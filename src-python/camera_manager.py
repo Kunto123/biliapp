@@ -345,7 +345,11 @@ class CameraManager:
     def release(self):
         """Release camera resource."""
         if self.cap is not None:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
         self.is_open = False
 
     def __enter__(self):

@@ -16,6 +16,9 @@ const state = {
   lastPrediction: null,
   previewPollMs: DEFAULT_PREVIEW_POLL_MS,
   backendStatus: null,
+  isCapturing: false,
+  lastFocusOk: null,
+  lastFocusScore: null,
 };
 
 // ── API helpers ───────────────────────────────────────────────────────────
@@ -55,24 +58,63 @@ function toast(msg, duration = 2500) {
 }
 
 // ── Camera preview ────────────────────────────────────────────────────────
+function setFocusState(focusOk, focusScore) {
+  const cls = focusOk === true ? 'focus-ok' : focusOk === false ? 'focus-warn' : 'focus-idle';
+  state.lastFocusOk = focusOk === true ? true : focusOk === false ? false : null;
+  state.lastFocusScore = typeof focusScore === 'number' ? focusScore : null;
+
+  [document.getElementById('camera-wrap'), document.getElementById('focus-reticle')]
+    .filter(Boolean)
+    .forEach(el => {
+      el.classList.remove('focus-ok', 'focus-warn', 'focus-idle');
+      el.classList.add(cls);
+    });
+}
+
+function updateLastThumb() {
+  const img = document.getElementById('last-thumb-img');
+  const empty = document.getElementById('last-thumb-empty');
+  if (!img || !empty) return;
+
+  if (state.lastImageB64) {
+    img.src = 'data:image/jpeg;base64,' + state.lastImageB64;
+    img.style.display = 'block';
+    empty.style.display = 'none';
+  } else {
+    img.removeAttribute('src');
+    img.style.display = 'none';
+    empty.style.display = 'block';
+  }
+}
+
 function startCamera() {
   stopCamera();
+  updateLastThumb();
+  setFocusState(null, null);
   const img = document.getElementById('cam-img');
   const ph  = document.getElementById('cam-placeholder');
 
   async function tick() {
     if (state.currentScreen !== 'screen-home') return;
+    if (state.isCapturing) {
+      state.cameraTimer = setTimeout(tick, state.previewPollMs || DEFAULT_PREVIEW_POLL_MS);
+      return;
+    }
     try {
       const d = await apiGet('/api/camera/frame');
       if (d.available && d.frame) {
         img.src = 'data:image/jpeg;base64,' + d.frame;
         img.style.display = 'block';
         ph.style.display  = 'none';
+        setFocusState(typeof d.focus_ok === 'boolean' ? d.focus_ok : null, d.focus_score);
       } else {
         img.style.display = 'none';
         ph.style.display  = 'flex';
+        setFocusState(null, null);
       }
-    } catch { /* server not ready yet */ }
+    } catch {
+      setFocusState(null, null);
+    }
     state.cameraTimer = setTimeout(tick, state.previewPollMs || DEFAULT_PREVIEW_POLL_MS);
   }
   tick();
@@ -88,7 +130,10 @@ const App = {
 
   // ── Home ────────────────────────────────────────────────────────────────
   goHome() {
-    showScreen('screen-home', startCamera);
+    showScreen('screen-home', () => {
+      updateLastThumb();
+      startCamera();
+    });
   },
 
   // ── Menu ────────────────────────────────────────────────────────────────
@@ -99,6 +144,8 @@ const App = {
 
   // ── Capture ─────────────────────────────────────────────────────────────
   async startCapture() {
+    if (state.isCapturing) return;
+    state.isCapturing = true;
     stopCamera();
     const btn = document.getElementById('btn-capture');
     btn.disabled = true;
@@ -122,6 +169,7 @@ const App = {
           <div style="font-size:13px">${e.message}</div>
         </div>`;
     } finally {
+      state.isCapturing = false;
       btn.disabled = false;
     }
   },
@@ -165,6 +213,7 @@ const App = {
 
   // ── Last image ────────────────────────────────────────────────────────────
   goLastImage() {
+    stopCamera();
     showScreen('screen-image', () => {
       const content = document.getElementById('image-content');
       if (!state.lastImageB64) {
@@ -372,6 +421,11 @@ function esc(str) {
 
 function renderCaptureResult(result) {
   const content = document.getElementById('capture-content');
+  if (result?.image_b64) {
+    state.lastImageB64 = result.image_b64;
+    updateLastThumb();
+  }
+
   if (!result || !result.success) {
     const errMsg = result?.error ?? 'Error tidak diketahui';
     const gateErrors = result?.gatecheck_errors ?? [];
@@ -429,9 +483,6 @@ function renderCaptureResult(result) {
       ${infoRow('Latency',  latency)}
     </div>`;
 
-  if (result.image_b64) {
-    state.lastImageB64 = result.image_b64;
-  }
   state.lastPrediction = bili;
 }
 

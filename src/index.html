@@ -25,32 +25,36 @@
 <!--  HOME                                                                 -->
 <!-- ══════════════════════════════════════════════════════════════════════ -->
 <div id="screen-home" class="screen">
-  <div class="header">
-    <div class="header-title">SISTEM DETEKSI BILIRUBIN</div>
-    <div class="header-sub">Pemeriksaan Kadar Bilirubin Bayi Neonatal</div>
-  </div>
-
-  <!-- camera area: flex-grow to fill remaining space -->
   <div class="home-body">
-    <div class="camera-wrap">
+    <div class="camera-wrap focus-idle" id="camera-wrap">
       <img id="cam-img" class="cam-img" alt="Camera" />
       <div id="cam-placeholder" class="cam-placeholder">
-        <div class="cam-icon">📷</div>
-        <div>Memuat kamera…</div>
+        <div class="cam-icon">&#128247;</div>
+        <div>Memuat kamera...</div>
         <div class="cam-hint">Hubungkan kamera dan restart</div>
+      </div>
+      <div class="camera-corners" aria-hidden="true">
+        <span class="cam-corner corner-tl"></span>
+        <span class="cam-corner corner-tr"></span>
+        <span class="cam-corner corner-bl"></span>
+        <span class="cam-corner corner-br"></span>
+      </div>
+      <div id="focus-reticle" class="focus-reticle focus-idle" aria-hidden="true">
+        <span class="focus-line focus-line-h"></span>
+        <span class="focus-line focus-line-v"></span>
       </div>
     </div>
 
-    <div class="status-strip" id="home-status">
-      <span class="status-dot">●</span> Siap — Arahkan ke bayi dengan kartu kalibrasi
-    </div>
-
-    <div class="home-btns">
-      <button class="btn btn-primary btn-capture" id="btn-capture" onclick="App.startCapture()">
-        📸 CAPTURE PENGUKURAN
+    <div class="camera-controls">
+      <button class="thumb-button" id="last-thumb" onclick="App.goLastImage()" aria-label="Lihat foto terakhir">
+        <img id="last-thumb-img" class="thumb-img" alt="" />
+        <span id="last-thumb-empty" class="thumb-empty"></span>
       </button>
-      <button class="btn btn-secondary btn-menu" onclick="App.goMenu()">
-        ⚙ MENU
+      <button class="capture-round" id="btn-capture" onclick="App.startCapture()" aria-label="Capture">
+        <span class="capture-icon">&#128247;</span>
+      </button>
+      <button class="settings-round" onclick="App.goSettings()" aria-label="Settings">
+        <span class="settings-icon">&#9881;</span>
       </button>
     </div>
   </div>

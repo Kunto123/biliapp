@@ -10,6 +10,7 @@ import sys
 import base64
 import cv2
 import time
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,7 @@ from config import (
     CAMERA_PREVIEW_RESOLUTION,
     CAMERA_TYPE,
     DEVICE_PROFILE,
+    GATECHECK_MIN_BLUR_SCORE,
     MODEL_BACKEND,
     MODEL_STAGE1_TFLITE_PATH,
     MODEL_STAGE2_TFLITE_PATH,
@@ -50,33 +52,77 @@ app.add_middleware(
 PORT = 7878
 
 pipeline: Optional[BilirubinPredictionPipeline] = None
-preview_cap: Optional[cv2.VideoCapture] = None
 preview_cache_b64: Optional[str] = None
 preview_cache_at: float = 0.0
+preview_focus_score: Optional[float] = None
+preview_focus_ok: Optional[bool] = None
+camera_lock = threading.RLock()
+capture_in_progress = False
 
 
-def _init_preview_cap():
-    global preview_cap
-    if CAMERA_TYPE != "opencv":
-        preview_cap = None
-        return
-    try:
-        cap = cv2.VideoCapture(0)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_PREVIEW_RESOLUTION[0])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_PREVIEW_RESOLUTION[1])
-            cap.set(cv2.CAP_PROP_FPS, max(1, int(1000 / max(PREVIEW_POLL_MS, 1))))
-            preview_cap = cap
-    except Exception:
-        preview_cap = None
+def _camera_is_available() -> bool:
+    return pipeline is not None and pipeline.camera is not None and pipeline.camera.is_open
+
+
+def _prepare_preview_frame(frame):
+    width, height = CAMERA_PREVIEW_RESOLUTION
+    if frame.shape[1] != width or frame.shape[0] != height:
+        return cv2.resize(frame, (width, height))
+    return frame
+
+
+def _calculate_focus_score(frame) -> float:
+    if len(frame.shape) == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = frame
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def _encode_preview_frame(frame):
-    width, height = CAMERA_PREVIEW_RESOLUTION
-    if frame.shape[1] != width or frame.shape[0] != height:
-        frame = cv2.resize(frame, (width, height))
+    frame = _prepare_preview_frame(frame)
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY])
     return base64.b64encode(buf).decode()
+
+
+def _update_preview_cache(frame, timestamp: Optional[float] = None) -> None:
+    global preview_cache_b64, preview_cache_at, preview_focus_score, preview_focus_ok
+
+    preview_frame = _prepare_preview_frame(frame)
+    preview_focus_score = _calculate_focus_score(preview_frame)
+    preview_focus_ok = preview_focus_score >= GATECHECK_MIN_BLUR_SCORE
+    _, buf = cv2.imencode(".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY])
+    preview_cache_b64 = base64.b64encode(buf).decode()
+    preview_cache_at = timestamp if timestamp is not None else time.monotonic()
+
+
+def _preview_payload(frame_b64: Optional[str], available: bool, **extra):
+    payload = {
+        "frame": frame_b64,
+        "available": available,
+        "focus_score": preview_focus_score,
+        "focus_ok": preview_focus_ok,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _reset_camera_if_needed(force: bool = False) -> bool:
+    if pipeline is None:
+        return False
+
+    camera = getattr(pipeline, "camera", None)
+    if camera is not None and camera.is_open and not force:
+        return True
+
+    try:
+        if camera is not None:
+            camera.release()
+        pipeline.camera = pipeline._init_configured_camera()
+        return _camera_is_available()
+    except Exception as exc:
+        pipeline.last_error = f"Camera reconnect failed: {exc}"
+        return False
 
 
 @app.on_event("startup")
@@ -101,16 +147,12 @@ async def startup():
         print("[api] ✓ Pipeline initialized")
     except Exception as e:
         print(f"[api] ✗ Pipeline init failed: {e}")
-    _init_preview_cap()
-
 
 @app.on_event("shutdown")
 async def shutdown():
-    global preview_cap
-    if preview_cap:
-        preview_cap.release()
-    if pipeline:
-        pipeline.cleanup()
+    with camera_lock:
+        if pipeline:
+            pipeline.cleanup()
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -141,71 +183,88 @@ async def get_status():
 
 @app.get("/api/camera/frame")
 async def get_camera_frame():
-    global preview_cap, preview_cache_b64, preview_cache_at
     now = time.monotonic()
     min_interval = PREVIEW_POLL_MS / 1000.0
 
     if preview_cache_b64 and (now - preview_cache_at) < min_interval:
-        return {"frame": preview_cache_b64, "available": True, "cached": True}
+        return _preview_payload(preview_cache_b64, True, cached=True)
 
-    if CAMERA_TYPE == "libcamera":
-        if pipeline is None or pipeline.camera is None:
-            return {"frame": None, "available": False}
+    if capture_in_progress:
+        return _preview_payload(preview_cache_b64, preview_cache_b64 is not None, busy=True)
+
+    if not camera_lock.acquire(blocking=False):
+        return _preview_payload(preview_cache_b64, preview_cache_b64 is not None, busy=True)
+
+    try:
+        if not _camera_is_available() and not _reset_camera_if_needed():
+            return _preview_payload(None, False)
+
         frame = pipeline.camera.capture_image()
         if frame is None:
-            return {"frame": None, "available": False, "error": pipeline.camera.error_message}
-        preview_cache_b64 = _encode_preview_frame(frame)
-        preview_cache_at = now
-        return {"frame": preview_cache_b64, "available": True, "cached": False}
+            error = pipeline.camera.error_message
+            _reset_camera_if_needed(force=True)
+            return _preview_payload(
+                preview_cache_b64,
+                preview_cache_b64 is not None,
+                error=error,
+            )
 
-    if preview_cap is None or not preview_cap.isOpened():
-        _init_preview_cap()
-    if preview_cap is None or not preview_cap.isOpened():
-        return {"frame": None, "available": False}
-    ret, frame = preview_cap.read()
-    if not ret or frame is None:
-        return {"frame": None, "available": False}
-    preview_cache_b64 = _encode_preview_frame(frame)
-    preview_cache_at = now
-    return {"frame": preview_cache_b64, "available": True, "cached": False}
+        _update_preview_cache(frame, now)
+        return _preview_payload(preview_cache_b64, True, cached=False)
+    finally:
+        camera_lock.release()
 
 
 @app.post("/api/camera/reconnect")
 async def reconnect_camera():
-    global preview_cap, preview_cache_b64, preview_cache_at
-    try:
-        if preview_cap:
-            preview_cap.release()
-        preview_cap = None
+    global preview_cache_b64, preview_cache_at, preview_focus_score, preview_focus_ok
+    with camera_lock:
         preview_cache_b64 = None
         preview_cache_at = 0.0
+        preview_focus_score = None
+        preview_focus_ok = None
         if pipeline is not None:
             pipeline.cleanup()
             pipeline.camera = pipeline._init_configured_camera()
-        _init_preview_cap()
-        ok = (preview_cap is not None and preview_cap.isOpened()) or (
-            pipeline is not None and pipeline.camera is not None
-        )
+        ok = _camera_is_available()
         return {"success": ok}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 
 # ── Prediction ────────────────────────────────────────────────────────────────
 
 @app.post("/api/capture")
 async def capture_and_predict():
+    global capture_in_progress
     if pipeline is None:
         return {"success": False, "error": "Pipeline tidak diinisialisasi"}
-    prediction, result = pipeline.capture_and_predict()
-    if result.get("timestamp"):
-        result["timestamp"] = result["timestamp"].isoformat()
-    if result.get("image_path") and Path(result["image_path"]).exists():
-        img = cv2.imread(result["image_path"])
-        if img is not None:
-            _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            result["image_b64"] = base64.b64encode(buf).decode()
-    return result
+
+    with camera_lock:
+        capture_in_progress = True
+        try:
+            prediction, result = pipeline.capture_and_predict()
+            if result.get("timestamp"):
+                result["timestamp"] = result["timestamp"].isoformat()
+
+            if result.get("image_path") and Path(result["image_path"]).exists():
+                img = cv2.imread(result["image_path"])
+                if img is not None:
+                    _update_preview_cache(img)
+                    _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    result["image_b64"] = base64.b64encode(buf).decode()
+
+            if not result.get("success"):
+                error_text = str(result.get("error") or "").lower()
+                camera_failed = (
+                    error_text.startswith("camera")
+                    or "capture failed" in error_text
+                    or "rpicam" in error_text
+                    or "libcamera" in error_text
+                )
+                result["camera_recovered"] = _reset_camera_if_needed(force=camera_failed)
+
+            return result
+        finally:
+            capture_in_progress = False
 
 
 # ── History & Stats ───────────────────────────────────────────────────────────
