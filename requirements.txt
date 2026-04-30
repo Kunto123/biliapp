@@ -1,0 +1,19 @@
+# requirements.txt — Python dependencies untuk bili-app Tauri backend
+# Install: pip install -r requirements.txt
+
+# ML framework
+tensorflow==2.21.0
+flatbuffers>=24.3.25
+
+# Image processing
+opencv-python>=4.10.0
+Pillow>=10.1.0
+
+# Data
+numpy>=1.26.0,<2.2
+pandas>=2.2.0
+scipy>=1.13.0
+
+# API server
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
