@@ -5,14 +5,50 @@ Camera management for ArduCam Hawkeye 64MP on Raspberry Pi.
 Supports libcamera and fallback to OpenCV VideoCapture.
 """
 
+from __future__ import annotations
+
 import cv2
 import numpy as np
-from pathlib import Path
 from typing import Optional, Tuple
 from enum import Enum
+from collections import deque
 import shutil
 import subprocess
-import warnings
+import threading
+import time
+
+VALID_CAMERA_ROTATIONS = {0, 90, 180, 270}
+JPEG_SOI = b"\xff\xd8"
+JPEG_EOI = b"\xff\xd9"
+
+
+def normalize_camera_rotation(rotation: int) -> int:
+    try:
+        value = int(rotation)
+    except (TypeError, ValueError):
+        return 0
+    return value if value in VALID_CAMERA_ROTATIONS else 0
+
+
+def extract_jpeg_frames(buffer: bytes) -> tuple[list[bytes], bytes]:
+    """Extract complete JPEG images from an MJPEG byte buffer."""
+    frames = []
+
+    while True:
+        start = buffer.find(JPEG_SOI)
+        if start < 0:
+            return frames, b""
+
+        if start > 0:
+            buffer = buffer[start:]
+
+        end = buffer.find(JPEG_EOI, 2)
+        if end < 0:
+            return frames, buffer
+
+        frame_end = end + len(JPEG_EOI)
+        frames.append(buffer[:frame_end])
+        buffer = buffer[frame_end:]
 
 
 class CameraType(Enum):
@@ -20,6 +56,241 @@ class CameraType(Enum):
     LIBCAMERA = "libcamera"     # ArduCam via libcamera (recommended for Pi)
     OPENCV = "opencv"             # Generic USB/CSI via OpenCV
     PI_LEGACY = "pi_legacy"        # Legacy picamera (Pi < 5)
+
+
+class CameraPreviewStream:
+    """Continuously capture lightweight MJPEG preview frames."""
+
+    def __init__(
+        self,
+        camera_type: CameraType,
+        camera_index: int = 0,
+        resolution: Tuple[int, int] = (640, 480),
+        fps: int = 30,
+        min_fps: int = 30,
+        rotation: int = 0,
+        jpeg_quality: int = 65,
+    ):
+        self.camera_type = camera_type
+        self.camera_index = camera_index
+        self.resolution = resolution
+        self.fps = max(1, int(fps))
+        self.min_fps = max(1, int(min_fps))
+        self.rotation = normalize_camera_rotation(rotation)
+        self.jpeg_quality = max(1, min(100, int(jpeg_quality)))
+
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._process: Optional[subprocess.Popen] = None
+        self._cap = None
+        self._latest_jpeg: Optional[bytes] = None
+        self._latest_at: float = 0.0
+        self._frame_times = deque(maxlen=max(self.fps * 3, 30))
+        self._error_message: Optional[str] = None
+
+    @staticmethod
+    def find_video_command() -> Optional[str]:
+        return shutil.which("rpicam-vid") or shutil.which("libcamera-vid")
+
+    def build_libcamera_command(self) -> Optional[list[str]]:
+        video_cmd = self.find_video_command()
+        if not video_cmd:
+            return None
+
+        width, height = self.resolution
+        return [
+            video_cmd,
+            "-n",
+            "-t",
+            "0",
+            "--codec",
+            "mjpeg",
+            "--width",
+            str(width),
+            "--height",
+            str(height),
+            "--framerate",
+            str(self.fps),
+            "--rotation",
+            str(self.rotation),
+            "-o",
+            "-",
+        ]
+
+    @property
+    def is_running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def start(self) -> bool:
+        if self.is_running:
+            return True
+
+        self.stop()
+        self._stop_event.clear()
+        self._error_message = None
+
+        target = self._run_libcamera if self.camera_type == CameraType.LIBCAMERA else self._run_opencv
+        self._thread = threading.Thread(target=target, name="camera-preview", daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+        process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=1.5)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+        cap = self._cap
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+        self._thread = None
+        self._process = None
+        self._cap = None
+
+    def get_latest_jpeg(self) -> Optional[bytes]:
+        with self._lock:
+            return self._latest_jpeg
+
+    def status(self) -> dict:
+        with self._lock:
+            fps = self._calculate_fps_locked()
+            return {
+                "available": self._latest_jpeg is not None,
+                "running": self.is_running,
+                "fps": fps,
+                "fps_ok": fps >= self.min_fps if fps is not None else False,
+                "target_fps": self.fps,
+                "min_fps": self.min_fps,
+                "frame_size": self.resolution,
+                "updated_at": self._latest_at,
+                "error": self._error_message,
+            }
+
+    def _store_jpeg(self, jpeg: bytes) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._latest_jpeg = jpeg
+            self._latest_at = now
+            self._frame_times.append(now)
+            self._error_message = None
+
+    def _calculate_fps_locked(self) -> Optional[float]:
+        if len(self._frame_times) < 2:
+            return None
+        elapsed = self._frame_times[-1] - self._frame_times[0]
+        if elapsed <= 0:
+            return None
+        return round((len(self._frame_times) - 1) / elapsed, 1)
+
+    def _set_error(self, message: str) -> None:
+        with self._lock:
+            self._error_message = message
+
+    def _run_libcamera(self) -> None:
+        cmd = self.build_libcamera_command()
+        if not cmd:
+            self._set_error("rpicam-vid/libcamera-vid not found")
+            return
+
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except Exception as exc:
+            self._set_error(f"Failed to start preview stream: {exc}")
+            return
+
+        buffer = b""
+        stdout = self._process.stdout
+        if stdout is None:
+            self._set_error("Preview stream stdout unavailable")
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                chunk = stdout.read(8192)
+            except Exception as exc:
+                self._set_error(f"Preview stream read failed: {exc}")
+                break
+
+            if not chunk:
+                if self._process and self._process.poll() is not None:
+                    self._set_error(f"Preview stream stopped ({self._process.returncode})")
+                    break
+                time.sleep(0.005)
+                continue
+
+            buffer += chunk
+            frames, buffer = extract_jpeg_frames(buffer)
+            for frame in frames:
+                self._store_jpeg(frame)
+
+    def _run_opencv(self) -> None:
+        cap = cv2.VideoCapture(self.camera_index)
+        self._cap = cap
+        if not cap.isOpened():
+            self._set_error(f"Failed to open preview camera at index {self.camera_index}")
+            return
+
+        width, height = self.resolution
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+        frame_interval = 1.0 / self.fps
+        while not self._stop_event.is_set():
+            started = time.monotonic()
+            ok, frame = cap.read()
+            if not ok:
+                self._set_error("Failed to read preview frame")
+                time.sleep(0.05)
+                continue
+
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+            frame = self._apply_rotation_for_preview(frame)
+
+            ok, buf = cv2.imencode(
+                ".jpg",
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
+            )
+            if ok:
+                self._store_jpeg(buf.tobytes())
+
+            elapsed = time.monotonic() - started
+            if elapsed < frame_interval:
+                time.sleep(frame_interval - elapsed)
+
+    def _apply_rotation_for_preview(self, frame: np.ndarray) -> np.ndarray:
+        if self.rotation == 90:
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        if self.rotation == 180:
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        if self.rotation == 270:
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
 
 
 class CameraManager:
@@ -37,6 +308,7 @@ class CameraManager:
         brightness: float = 0.0,
         auto_exposure: bool = True,
         timeout_seconds: float = 20.0,
+        rotation: int = 0,
     ):
         """
         Initialize camera.
@@ -47,6 +319,7 @@ class CameraManager:
             resolution: (width, height) tuple
             brightness: Brightness adjustment (-1.0 to 1.0)
             auto_exposure: Enable auto exposure
+            rotation: Camera rotation in degrees (0, 90, 180, 270)
         """
         self.camera_type = camera_type
         self.camera_index = camera_index
@@ -54,12 +327,26 @@ class CameraManager:
         self.brightness = brightness
         self.auto_exposure = auto_exposure
         self.timeout_seconds = timeout_seconds
+        self.rotation = self._normalize_rotation(rotation)
         
         self.cap = None
         self._rpicam_cmd = None
         self.is_open = False
         self.error_message = None
         self._init_camera()
+
+    @staticmethod
+    def _normalize_rotation(rotation: int) -> int:
+        return normalize_camera_rotation(rotation)
+
+    def _apply_rotation(self, frame: np.ndarray) -> np.ndarray:
+        if self.rotation == 90:
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        if self.rotation == 180:
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        if self.rotation == 270:
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
 
     def _init_camera(self) -> bool:
         """Initialize camera connection."""
@@ -153,6 +440,8 @@ class CameraManager:
             str(width),
             "--height",
             str(height),
+            "--rotation",
+            str(self.rotation),
             "--encoding",
             "jpg",
             "-o",
@@ -227,7 +516,7 @@ class CameraManager:
                 self.error_message = "Failed to capture frame"
                 return None
 
-            return frame  # BGR format
+            return self._apply_rotation(frame)  # BGR format
 
         except Exception as e:
             self.error_message = str(e)
@@ -336,6 +625,7 @@ class CameraManager:
                 "brightness": self.brightness,
                 "auto_exposure": self.auto_exposure,
                 "timeout_seconds": self.timeout_seconds,
+                "camera_rotation": self.rotation,
                 "capture_command": self._rpicam_cmd,
                 "error": None
             }
@@ -344,9 +634,10 @@ class CameraManager:
 
     def release(self):
         """Release camera resource."""
-        if self.cap is not None:
+        cap = getattr(self, "cap", None)
+        if cap is not None:
             try:
-                self.cap.release()
+                cap.release()
             except Exception:
                 pass
             self.cap = None
@@ -365,7 +656,7 @@ class CameraManager:
         self.release()
 
 
-def auto_detect_camera() -> Optional[CameraManager]:
+def auto_detect_camera(rotation: int = 0) -> Optional[CameraManager]:
     """
     Auto-detect available camera and initialize.
     
@@ -374,7 +665,7 @@ def auto_detect_camera() -> Optional[CameraManager]:
     """
     # Try rpicam/libcamera first on Raspberry Pi.
     try:
-        cam = CameraManager(camera_type=CameraType.LIBCAMERA)
+        cam = CameraManager(camera_type=CameraType.LIBCAMERA, rotation=rotation)
         if cam.is_open:
             return cam
     except Exception:
@@ -385,13 +676,13 @@ def auto_detect_camera() -> Optional[CameraManager]:
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
             cap.release()
-            return CameraManager(camera_type=CameraType.OPENCV, camera_index=0)
+            return CameraManager(camera_type=CameraType.OPENCV, camera_index=0, rotation=rotation)
     except Exception:
         pass
 
     # Try libcamera if on Raspberry Pi 5
     try:
-        return CameraManager(camera_type=CameraType.LIBCAMERA)
+        return CameraManager(camera_type=CameraType.LIBCAMERA, rotation=rotation)
     except Exception:
         pass
 

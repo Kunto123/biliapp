@@ -5,16 +5,19 @@
  */
 
 const API = 'http://127.0.0.1:7878';
-const DEFAULT_PREVIEW_POLL_MS = 250;
+const DEFAULT_PREVIEW_POLL_MS = 33;
+const DEFAULT_PREVIEW_STATUS_MS = 500;
 
 // ── State ─────────────────────────────────────────────────────────────────
 const state = {
   currentScreen: 'screen-splash',
   cameraTimer: null,
+  cameraStatusTimer: null,
   useStage2: true,
   lastImageB64: null,
   lastPrediction: null,
   previewPollMs: DEFAULT_PREVIEW_POLL_MS,
+  previewStatusMs: DEFAULT_PREVIEW_STATUS_MS,
   backendStatus: null,
   isCapturing: false,
   lastFocusOk: null,
@@ -71,6 +74,35 @@ function setFocusState(focusOk, focusScore) {
     });
 }
 
+function setCameraStatus(status) {
+  const el = document.getElementById('camera-status');
+  if (!el) return;
+
+  el.classList.remove('is-visible', 'is-warn', 'is-idle');
+  el.textContent = '';
+
+  if (!status) return;
+
+  if (status.busy) {
+    el.textContent = 'Kamera sedang capture';
+    el.classList.add('is-visible', 'is-idle');
+    return;
+  }
+
+  if (status.available === false) {
+    el.textContent = 'Menunggu kamera...';
+    el.classList.add('is-visible', 'is-idle');
+    return;
+  }
+
+  if (status.fps_ok === false && typeof status.fps === 'number') {
+    const fps = Number(status.fps).toFixed(1);
+    const minFps = status.min_fps ?? 30;
+    el.textContent = `Preview ${fps} FPS, target ${minFps} FPS`;
+    el.classList.add('is-visible', 'is-warn');
+  }
+}
+
 function updateLastThumb() {
   const img = document.getElementById('last-thumb-img');
   const empty = document.getElementById('last-thumb-empty');
@@ -91,38 +123,64 @@ function startCamera() {
   stopCamera();
   updateLastThumb();
   setFocusState(null, null);
+  setCameraStatus(null);
   const img = document.getElementById('cam-img');
   const ph  = document.getElementById('cam-placeholder');
 
-  async function tick() {
+  if (img) {
+    img.onload = () => {
+      img.style.display = 'block';
+      ph.style.display = 'none';
+    };
+    img.onerror = () => {
+      img.style.display = 'none';
+      ph.style.display = 'flex';
+      setCameraStatus({ available: false });
+    };
+    img.src = `${API}/api/camera/stream?ts=${Date.now()}`;
+  }
+
+  async function tickStatus() {
     if (state.currentScreen !== 'screen-home') return;
     if (state.isCapturing) {
-      state.cameraTimer = setTimeout(tick, state.previewPollMs || DEFAULT_PREVIEW_POLL_MS);
+      state.cameraStatusTimer = setTimeout(tickStatus, state.previewStatusMs);
       return;
     }
     try {
-      const d = await apiGet('/api/camera/frame');
-      if (d.available && d.frame) {
-        img.src = 'data:image/jpeg;base64,' + d.frame;
+      const d = await apiGet('/api/camera/preview/status');
+      if (d.available) {
         img.style.display = 'block';
         ph.style.display  = 'none';
         setFocusState(typeof d.focus_ok === 'boolean' ? d.focus_ok : null, d.focus_score);
+        setCameraStatus(d);
       } else {
         img.style.display = 'none';
         ph.style.display  = 'flex';
         setFocusState(null, null);
+        setCameraStatus(d);
       }
     } catch {
       setFocusState(null, null);
+      setCameraStatus({ available: false });
     }
-    state.cameraTimer = setTimeout(tick, state.previewPollMs || DEFAULT_PREVIEW_POLL_MS);
+    state.cameraStatusTimer = setTimeout(tickStatus, state.previewStatusMs);
   }
-  tick();
+  tickStatus();
 }
 
 function stopCamera() {
   clearTimeout(state.cameraTimer);
+  clearTimeout(state.cameraStatusTimer);
   state.cameraTimer = null;
+  state.cameraStatusTimer = null;
+  const img = document.getElementById('cam-img');
+  if (img) {
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute('src');
+    img.style.display = 'none';
+  }
+  setCameraStatus(null);
 }
 
 // ── App public API ────────────────────────────────────────────────────────
@@ -263,7 +321,7 @@ const App = {
             title: 'RUNTIME',
             rows: [
               ['Device',    runtime.device_profile ?? 'desktop'],
-              ['Preview',   runtime.preview_poll_ms ? `${runtime.preview_poll_ms} ms` : '?'],
+              ['Preview',   runtime.preview_fps ? `${runtime.preview_fps} FPS` : '?'],
               ['Server',    s.initialized ? 'Aktif' : 'Tidak aktif'],
             ],
           },
@@ -296,12 +354,14 @@ const App = {
       try {
         const s   = await apiGet('/api/status');
         const cam = s.camera ?? {};
+        const runtime = s.runtime_config ?? {};
         content.innerHTML = `
           <div class="card">
             ${infoRow('Status',   cam.status   ?? '?')}
             ${infoRow('Tipe',     cam.camera_type ?? '?')}
             ${infoRow('Resolusi', cam.frame_size ? JSON.stringify(cam.frame_size) : '?')}
             ${infoRow('FPS',      cam.fps != null ? String(parseFloat(cam.fps).toFixed(0)) : '?')}
+            ${infoRow('Preview',  runtime.preview_fps ? `${runtime.preview_fps} FPS` : '?')}
           </div>
           <button class="btn btn-primary" style="width:100%; margin-top:4px" onclick="App.reconnectCamera()">
             🔄 Sambung Ulang Kamera
@@ -500,6 +560,7 @@ async function waitForServer() {
       if (s) {
         const runtime = s.runtime_config ?? {};
         state.previewPollMs = runtime.preview_poll_ms ?? DEFAULT_PREVIEW_POLL_MS;
+        state.previewStatusMs = Math.max(DEFAULT_PREVIEW_STATUS_MS, runtime.preview_poll_ms ?? DEFAULT_PREVIEW_STATUS_MS);
         statusEl.textContent = '✓ Terhubung!';
         await new Promise(r => setTimeout(r, 400));
         App.goHome();

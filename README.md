@@ -36,32 +36,57 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
    ```
    Copy the generated `models/best_model_stage1.tflite` and `models/best_model_stage2.tflite` to the Raspberry Pi.
 
-5. Run with Pi defaults:
+5. Run the production app with Pi defaults:
+   ```bash
+   chmod +x scripts/run-raspi.sh scripts/install-raspi-autostart.sh
+   ./scripts/run-raspi.sh
+   ```
+   The script builds once when `src-tauri/target/release/bili-app` is missing,
+   then starts the production binary. It sets Raspberry Pi defaults for
+   libcamera, TFLite, stage 1 only, and 30 FPS MJPEG preview. Camera rotation
+   defaults to `CAMERA_ROTATION` in `src-python/config.py`.
+
+   To override camera rotation for one run:
+   ```bash
+   BILIRUBIN_CAMERA_ROTATION=90 ./scripts/run-raspi.sh
+   ```
+
+   To change the default in code, edit `CAMERA_ROTATION` in
+   `src-python/config.py`. Valid values are `0`, `90`, `180`, and `270`.
+
+6. Smoke test:
    ```bash
    export BILIRUBIN_DEVICE=raspi5
    export BILIRUBIN_CAMERA_TYPE=libcamera
    export BILIRUBIN_MODEL_BACKEND=tflite
    export BILIRUBIN_USE_STAGE2=0
+   export BILIRUBIN_CAMERA_ROTATION=180
    python src-python/api_server.py
    ```
-
-6. Smoke test:
+   In another terminal:
    ```bash
    curl http://127.0.0.1:7878/api/status
+   curl http://127.0.0.1:7878/api/camera/preview/status
    curl http://127.0.0.1:7878/api/camera/frame
    curl -X POST http://127.0.0.1:7878/api/capture
    ```
 
-7. Run the Tauri app:
+7. Enable autostart after GUI login:
    ```bash
-   npm run tauri dev
+   ./scripts/install-raspi-autostart.sh
    ```
+   Reboot and log in to the desktop session. To start automatically after
+   power-on, enable GUI auto-login in Raspberry Pi/Ubuntu settings. Autostart
+   logs are written to `logs/autostart.log`.
 
 Useful Raspberry Pi environment overrides:
 
 - `BILIRUBIN_CAMERA_RESOLUTION=1920x1080`
 - `BILIRUBIN_CAMERA_PREVIEW_RESOLUTION=640x480`
-- `BILIRUBIN_PREVIEW_POLL_MS=1000`
+- `BILIRUBIN_CAMERA_ROTATION=180`
+- `BILIRUBIN_PREVIEW_FPS=30`
+- `BILIRUBIN_PREVIEW_MIN_FPS=30`
+- `BILIRUBIN_PREVIEW_POLL_MS=500`
 - `BILIRUBIN_MIN_BLUR_SCORE=60`
 - `BILIRUBIN_MAX_RAW_PALETTE_MAE=95`
 

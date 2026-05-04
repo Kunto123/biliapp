@@ -412,6 +412,36 @@ html, body {
   opacity: 0.72;
 }
 
+.camera-status {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  z-index: 4;
+  transform: translateX(-50%);
+  min-height: 26px;
+  max-width: calc(100% - 44px);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(8,18,31,0.76);
+  color: rgba(255,255,255,0.88);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.15;
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+
+.camera-status.is-visible { opacity: 1; }
+.camera-status.is-warn {
+  background: rgba(122,72,0,0.84);
+  color: #fff3d0;
+}
+.camera-status.is-idle {
+  background: rgba(8,18,31,0.76);
+}
+
 .camera-controls {
   position: absolute;
   left: 0;

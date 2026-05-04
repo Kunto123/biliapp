@@ -43,6 +43,11 @@ def _env_resolution(name: str, default: tuple[int, int]) -> tuple[int, int]:
     except (ValueError, TypeError):
         return default
 
+
+def _env_rotation(name: str, default: int) -> int:
+    value = _env_int(name, default)
+    return value if value in {0, 90, 180, 270} else default
+
 # ===== PATHS =====
 PROJECT_ROOT = Path(__file__).parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -72,11 +77,14 @@ CAMERA_RESOLUTION = _env_resolution(
     (1920, 1080) if IS_RASPBERRY_PI else (3840, 2160),
 )
 CAMERA_PREVIEW_RESOLUTION = _env_resolution("BILIRUBIN_CAMERA_PREVIEW_RESOLUTION", (640, 480))
+CAMERA_ROTATION = _env_rotation("BILIRUBIN_CAMERA_ROTATION", 180)
 CAMERA_AUTO_EXPOSURE = _env_bool("BILIRUBIN_CAMERA_AUTO_EXPOSURE", True)
 CAMERA_BRIGHTNESS = _env_float("BILIRUBIN_CAMERA_BRIGHTNESS", 0.0)
 CAMERA_TIMEOUT_SECONDS = _env_float("BILIRUBIN_CAMERA_TIMEOUT_SECONDS", 8.0 if IS_RASPBERRY_PI else 20.0)
-PREVIEW_POLL_MS = _env_int("BILIRUBIN_PREVIEW_POLL_MS", 1000 if IS_RASPBERRY_PI else 250)
+PREVIEW_POLL_MS = _env_int("BILIRUBIN_PREVIEW_POLL_MS", 33 if IS_RASPBERRY_PI else 250)
 PREVIEW_JPEG_QUALITY = _env_int("BILIRUBIN_PREVIEW_JPEG_QUALITY", 65 if IS_RASPBERRY_PI else 70)
+PREVIEW_FPS = _env_int("BILIRUBIN_PREVIEW_FPS", 30)
+PREVIEW_MIN_FPS = _env_int("BILIRUBIN_PREVIEW_MIN_FPS", 30)
 
 # ===== PREPROCESSING =====
 PREPROCESSING_TARGET_SIZE = 512  # Warp card to 512x512
@@ -117,6 +125,13 @@ BATCH_SIZE = 1  # For inference
 
 print("[Config] Configuration loaded from:", __file__)
 print(
-    "[Config] device=%s backend=%s camera=%s resolution=%sx%s"
-    % (DEVICE_PROFILE, MODEL_BACKEND, CAMERA_TYPE, CAMERA_RESOLUTION[0], CAMERA_RESOLUTION[1])
+    "[Config] device=%s backend=%s camera=%s resolution=%sx%s rotation=%s"
+    % (
+        DEVICE_PROFILE,
+        MODEL_BACKEND,
+        CAMERA_TYPE,
+        CAMERA_RESOLUTION[0],
+        CAMERA_RESOLUTION[1],
+        CAMERA_ROTATION,
+    )
 )

@@ -20,6 +20,7 @@ from config import (
     CAMERA_BRIGHTNESS,
     CAMERA_INDEX,
     CAMERA_RESOLUTION,
+    CAMERA_ROTATION,
     CAMERA_TIMEOUT_SECONDS,
     CAMERA_TYPE,
     MODEL_BACKEND,
@@ -92,6 +93,7 @@ class BilirubinPredictionPipeline:
                 brightness=CAMERA_BRIGHTNESS,
                 auto_exposure=CAMERA_AUTO_EXPOSURE,
                 timeout_seconds=CAMERA_TIMEOUT_SECONDS,
+                rotation=CAMERA_ROTATION,
             )
             if camera.is_open:
                 return camera
@@ -99,7 +101,7 @@ class BilirubinPredictionPipeline:
         except Exception as exc:
             self.last_error = str(exc)
 
-        return auto_detect_camera()
+        return auto_detect_camera(rotation=CAMERA_ROTATION)
 
     def capture_and_predict(self) -> Tuple[Optional[float], Dict]:
         """
