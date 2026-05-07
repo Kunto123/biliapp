@@ -142,16 +142,7 @@ class BilirubinPredictionPipeline:
                 self.last_error = result["error"]
                 return None, result
 
-            # Step 2: Save captured image
-            timestamp = datetime.now()
-            save_ok, image_path = self.storage.save_image(image_bgr, prefix="capture", timestamp=timestamp)
-
-            if not save_ok:
-                image_path = None
-
-            result["image_path"] = image_path
-
-            # Step 3: Predict
+            # Step 2: Predict
             prediction, pred_info = self.prediction_engine.predict_from_image(image_bgr, return_diagnostics=True)
 
             if prediction is None:
@@ -166,27 +157,11 @@ class BilirubinPredictionPipeline:
                 result["palette_detected"] = pred_info.get("palette_detected", False)
                 result["quality_flags"] = pred_info.get("quality_flags", {})
                 result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
-                
-                # Log failed prediction if image was saved
-                if image_path:
-                    self.logger.log_prediction(
-                        timestamp=timestamp,
-                        image_filename=Path(image_path).name,
-                        image_path=image_path,
-                        bilirubin_prediction=None,
-                        preprocessing_mode=result["preprocessing_mode"],
-                        quality_label=result["quality_label"],
-                        quality_score=int(result["quality_score"]),
-                        success=False,
-                        error_message=result["error"],
-                        model_version=f"bilirubin_v1_{result['model_backend']}",
-                        notes="; ".join(result["gatecheck_errors"] or result["gatecheck_warnings"])
-                    )
 
                 self.last_error = result["error"]
                 return None, result
 
-            # Step 4: Log successful prediction
+            # Step 3: Save and log successful prediction only
             result["success"] = True
             result["bilirubin_prediction"] = prediction
             result["preprocessing_mode"] = pred_info.get("preprocessing_mode", "unknown")
@@ -202,21 +177,24 @@ class BilirubinPredictionPipeline:
             result["inference_time_ms"] = pred_info.get("inference_time_ms")
             result["error"] = None
 
-            # Log to file
-            if image_path:
-                self.logger.log_prediction(
-                    timestamp=timestamp,
-                    image_filename=Path(image_path).name,
-                    image_path=image_path,
-                    bilirubin_prediction=prediction,
-                    preprocessing_mode=result["preprocessing_mode"],
-                    quality_label=result["quality_label"],
-                    quality_score=int(result["quality_score"]),
-                    success=True,
-                    error_message=None,
-                    model_version=f"bilirubin_v1_{result['model_backend']}",
-                    notes=f"model_used={result['model_used']}; inference_ms={result['inference_time_ms']}"
-                )
+            timestamp = result["timestamp"]
+            save_ok, image_path = self.storage.save_image(image_bgr, prefix="capture", timestamp=timestamp)
+            if save_ok:
+                result["image_path"] = image_path
+
+            self.logger.log_prediction(
+                timestamp=timestamp,
+                image_filename=Path(image_path).name if save_ok else "",
+                image_path=image_path if save_ok else "",
+                bilirubin_prediction=prediction,
+                preprocessing_mode=result["preprocessing_mode"],
+                quality_label=result["quality_label"],
+                quality_score=int(result["quality_score"]),
+                success=True,
+                error_message=None,
+                model_version=f"bilirubin_v1_{result['model_backend']}",
+                notes=f"model_used={result['model_used']}; inference_ms={result['inference_time_ms']}"
+            )
 
             return prediction, result
 

@@ -28,6 +28,18 @@ fn get_backend_status(state: State<PythonServer>) -> BackendStatus {
     state.status.lock().unwrap().clone()
 }
 
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle, state: State<PythonServer>) -> Result<(), String> {
+    if let Some(mut child) = state.child.lock().map_err(|err| err.to_string())?.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        println!("[bili-app] Python server stopped");
+    }
+
+    app.exit(0);
+    Ok(())
+}
+
 fn find_app_root() -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         if cwd.join("src-python").join("api_server.py").exists() {
@@ -154,7 +166,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![get_api_url, get_backend_status])
+        .invoke_handler(tauri::generate_handler![get_api_url, get_backend_status, exit_app])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

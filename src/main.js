@@ -447,10 +447,14 @@ const App = {
   },
 
   // ── Exit ──────────────────────────────────────────────────────────────────
-  exitApp() {
+  async exitApp() {
     if (confirm('Yakin ingin keluar dari aplikasi?')) {
       if (window.__TAURI__?.core) {
-        window.__TAURI__.core.invoke('plugin:window|close');
+        try {
+          await window.__TAURI__.core.invoke('exit_app');
+        } catch {
+          window.close();
+        }
       } else {
         window.close();
       }
