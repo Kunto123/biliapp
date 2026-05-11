@@ -22,6 +22,13 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 warnings.filterwarnings("ignore")
 
 
+def _numpy_major_version() -> int:
+    try:
+        return int(np.__version__.split(".", 1)[0])
+    except (AttributeError, ValueError):
+        return 0
+
+
 class BilirubinPredictor:
     """
     Predict bilirubin level from image using trained models.
@@ -63,6 +70,13 @@ class BilirubinPredictor:
         )
 
         self._load_models()
+
+    def ensure_models_loaded(self) -> bool:
+        """Reload models if the predictor is alive but model objects are missing."""
+        if self.model_stage1 is not None:
+            return True
+        self.last_error = "Models not loaded; attempting reload"
+        return self._load_models()
 
     def _load_models(self) -> bool:
         """Load models for the selected backend."""
@@ -111,6 +125,14 @@ class BilirubinPredictor:
         try:
             if not self.tflite_stage1_path or not Path(self.tflite_stage1_path).exists():
                 self.last_error = f"Stage 1 TFLite model not found: {self.tflite_stage1_path}"
+                return False
+
+            if _numpy_major_version() >= 2:
+                self.last_error = (
+                    "tflite-runtime is incompatible with NumPy "
+                    f"{np.__version__}. Reinstall the Raspberry Pi environment with "
+                    "`pip install --force-reinstall 'numpy>=1.26,<2'` and then reinstall requirements-rpi.txt."
+                )
                 return False
 
             Interpreter = self._get_tflite_interpreter_class()
@@ -225,11 +247,12 @@ class BilirubinPredictor:
             (prediction_value, info_dict)
         """
         try:
-            if self.model_stage1 is None:
+            if not self.ensure_models_loaded():
                 return None, {
-                    "error": "Models not loaded",
+                    "error": self.last_error or "Models not loaded",
                     "success": False,
                     "model_backend": self.model_backend,
+                    "model_loaded": False,
                 }
 
             preprocessed_rgb, preprocess_mode, preprocess_diag = self.preprocessor.preprocess_image(

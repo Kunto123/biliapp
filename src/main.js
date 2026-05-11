@@ -589,6 +589,9 @@ function renderCaptureResult(result) {
     const gateErrors = result?.gatecheck_errors ?? [];
     const gateWarnings = result?.gatecheck_warnings ?? [];
     const title = result?.gatecheck_passed === false ? 'Foto Ditolak' : 'Prediksi Gagal';
+    const helper = result?.gatecheck_passed === false
+      ? 'Pastikan kartu kalibrasi, color palette, dan area kulit terlihat jelas.'
+      : 'Periksa status kamera dan model, lalu coba capture ulang.';
     const detail = gateErrors.length
       ? `<ul class="gate-list">${gateErrors.map(e => `<li>${esc(e)}</li>`).join('')}</ul>`
       : `<div style="font-size:13px">${esc(errMsg)}</div>`;
@@ -600,7 +603,7 @@ function renderCaptureResult(result) {
         <div style="font-size:18px; font-weight:700; margin-bottom:8px">${title}</div>
         ${detail}
         ${warnings}
-        <div style="font-size:12px; margin-top:10px">Pastikan kartu kalibrasi, color palette, dan area kulit terlihat jelas.</div>
+        <div style="font-size:12px; margin-top:10px">${helper}</div>
       </div>`;
     return;
   }

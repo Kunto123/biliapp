@@ -29,6 +29,12 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
    pip install -U pip
    pip install -r requirements-rpi.txt
    ```
+   If TensorFlow Lite fails with `_ARRAY_API not found`, the virtualenv has
+   NumPy 2.x. Reinstall the Pi dependencies with:
+   ```bash
+   pip install --force-reinstall "numpy>=1.26,<2"
+   pip install --force-reinstall -r requirements-rpi.txt
+   ```
 
 4. Convert model artifacts on a desktop/dev machine with TensorFlow installed:
    ```bash

@@ -120,7 +120,7 @@ class BilirubinPredictionPipeline:
             "preprocessing_mode": None,
             "quality_label": None,
             "quality_score": None,
-            "gatecheck_passed": False,
+            "gatecheck_passed": None,
             "gatecheck_errors": [],
             "gatecheck_warnings": [],
             "palette_detected": False,
@@ -154,7 +154,7 @@ class BilirubinPredictionPipeline:
                 result["preprocessing_mode"] = pred_info.get("preprocessing_mode", "unknown")
                 result["quality_label"] = pred_info.get("quality_label", "failed")
                 result["quality_score"] = pred_info.get("quality_score", 0)
-                result["gatecheck_passed"] = pred_info.get("gatecheck_passed", False)
+                result["gatecheck_passed"] = pred_info.get("gatecheck_passed")
                 result["gatecheck_errors"] = pred_info.get("gatecheck_errors", [])
                 result["gatecheck_warnings"] = pred_info.get("gatecheck_warnings", [])
                 result["palette_detected"] = pred_info.get("palette_detected", False)

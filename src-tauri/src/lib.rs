@@ -154,6 +154,13 @@ pub fn run() {
                     eprintln!("[bili-app] Failed to start Python server: {err}");
                 }
             }
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+                let _ = window.set_resizable(true);
+                let _ = window.maximize();
+                let _ = window.set_fullscreen(true);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
