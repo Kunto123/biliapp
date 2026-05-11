@@ -7,6 +7,7 @@
 const API = 'http://127.0.0.1:7878';
 const DEFAULT_PREVIEW_POLL_MS = 33;
 const DEFAULT_PREVIEW_STATUS_MS = 500;
+const CAMERA_CONTROLS_SPACE = 118;
 
 // ── State ─────────────────────────────────────────────────────────────────
 const state = {
@@ -22,7 +23,59 @@ const state = {
   isCapturing: false,
   lastFocusOk: null,
   lastFocusScore: null,
+  screenMetrics: null,
 };
+
+// ── Runtime viewport measurement ─────────────────────────────────────────
+function getScreenMetrics() {
+  const vv = window.visualViewport;
+  const dpr = window.devicePixelRatio || 1;
+  const cssWidth = Math.round(vv?.width || window.innerWidth || document.documentElement.clientWidth || screen.width);
+  const cssHeight = Math.round(vv?.height || window.innerHeight || document.documentElement.clientHeight || screen.height);
+  const offsetLeft = Math.round(vv?.offsetLeft || 0);
+  const offsetTop = Math.round(vv?.offsetTop || 0);
+  return {
+    css_width: cssWidth,
+    css_height: cssHeight,
+    physical_width: Math.round(cssWidth * dpr),
+    physical_height: Math.round(cssHeight * dpr),
+    screen_width: screen.width,
+    screen_height: screen.height,
+    device_pixel_ratio: dpr,
+    offset_left: offsetLeft,
+    offset_top: offsetTop,
+    orientation: cssWidth >= cssHeight ? 'landscape' : 'portrait',
+  };
+}
+
+function applyScreenMetrics() {
+  const metrics = getScreenMetrics();
+  state.screenMetrics = metrics;
+
+  const root = document.documentElement;
+  const controlsSpace = metrics.orientation === 'landscape'
+    ? Math.min(CAMERA_CONTROLS_SPACE, Math.max(84, Math.round(metrics.css_height * 0.24)))
+    : CAMERA_CONTROLS_SPACE;
+  const controlsTop = Math.max(0, metrics.offset_top + metrics.css_height - controlsSpace);
+
+  root.style.setProperty('--app-width', `${metrics.css_width}px`);
+  root.style.setProperty('--app-height', `${metrics.css_height}px`);
+  root.style.setProperty('--viewport-offset-left', `${metrics.offset_left}px`);
+  root.style.setProperty('--viewport-offset-top', `${metrics.offset_top}px`);
+  root.style.setProperty('--camera-controls-space', `${controlsSpace}px`);
+  root.style.setProperty('--camera-controls-top', `${controlsTop}px`);
+
+  return metrics;
+}
+
+function installScreenMetricsWatcher() {
+  const update = () => requestAnimationFrame(applyScreenMetrics);
+  applyScreenMetrics();
+  window.addEventListener('resize', update);
+  window.addEventListener('orientationchange', update);
+  window.visualViewport?.addEventListener('resize', update);
+  window.visualViewport?.addEventListener('scroll', update);
+}
 
 // ── API helpers ───────────────────────────────────────────────────────────
 async function apiFetch(method, path, body) {
@@ -45,6 +98,7 @@ async function getBackendStartStatus() {
 
 // ── Screen navigation ─────────────────────────────────────────────────────
 function showScreen(id, onEnter) {
+  applyScreenMetrics();
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   state.currentScreen = id;
   document.getElementById(id).classList.add('active');
@@ -681,6 +735,7 @@ async function waitForServer() {
 
 // ── Init ──────────────────────────────────────────────────────────────────
 window.App = App;
+window.getScreenMetrics = getScreenMetrics;
 
 // Append toast element
 const toastEl = document.createElement('div');
@@ -695,4 +750,5 @@ document.addEventListener('keydown', e => {
   }
 });
 
+installScreenMetricsWatcher();
 waitForServer();

@@ -25,6 +25,11 @@
   --radius:    10px;
   --radius-lg: 16px;
   --app-height: 100vh;
+  --app-width: 100vw;
+  --viewport-offset-left: 0px;
+  --viewport-offset-top: 0px;
+  --camera-controls-space: 118px;
+  --camera-controls-top: calc(100vh - var(--camera-controls-space));
   --content-max: 720px;
   --edge-x: max(14px, env(safe-area-inset-left));
   --edge-r: max(14px, env(safe-area-inset-right));
@@ -54,7 +59,7 @@ html, body {
 .screen {
   display: none;
   flex-direction: column;
-  width: 100%;
+  width: var(--app-width);
   height: var(--app-height);
   overflow: hidden;
   background: var(--bg);
@@ -325,8 +330,11 @@ html, body {
 }
 #screen-home.active {
   position: fixed;
-  inset: 0;
-  width: 100vw;
+  left: var(--viewport-offset-left);
+  top: var(--viewport-offset-top);
+  right: auto;
+  bottom: auto;
+  width: var(--app-width);
   height: var(--app-height);
 }
 
@@ -505,9 +513,12 @@ html, body {
 
 .camera-controls {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: var(--viewport-offset-left);
+  right: auto;
+  top: var(--camera-controls-top);
+  bottom: auto;
+  width: var(--app-width);
+  min-height: var(--camera-controls-space);
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
@@ -755,8 +766,7 @@ html, body {
   .result-num { font-size: 42px; }
 
   .camera-controls {
-    top: auto;
-    width: auto;
+    min-height: var(--camera-controls-space);
     grid-template-columns: 1fr auto 1fr;
     grid-template-rows: none;
     padding: 10px max(20px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
