@@ -24,27 +24,30 @@ const state = {
   lastFocusOk: null,
   lastFocusScore: null,
   screenMetrics: null,
+  nativeDisplayMetrics: null,
 };
 
 // ── Runtime viewport measurement ─────────────────────────────────────────
 function getScreenMetrics() {
   const vv = window.visualViewport;
   const dpr = window.devicePixelRatio || 1;
-  const cssWidth = Math.round(vv?.width || window.innerWidth || document.documentElement.clientWidth || screen.width);
-  const cssHeight = Math.round(vv?.height || window.innerHeight || document.documentElement.clientHeight || screen.height);
+  const native = state.nativeDisplayMetrics;
+  const cssWidth = Math.round(native?.css_width || vv?.width || window.innerWidth || document.documentElement.clientWidth || screen.width);
+  const cssHeight = Math.round(native?.css_height || vv?.height || window.innerHeight || document.documentElement.clientHeight || screen.height);
   const offsetLeft = Math.round(vv?.offsetLeft || 0);
   const offsetTop = Math.round(vv?.offsetTop || 0);
   return {
     css_width: cssWidth,
     css_height: cssHeight,
-    physical_width: Math.round(cssWidth * dpr),
-    physical_height: Math.round(cssHeight * dpr),
+    physical_width: Math.round(native?.monitor_width || cssWidth * dpr),
+    physical_height: Math.round(native?.monitor_height || cssHeight * dpr),
     screen_width: screen.width,
     screen_height: screen.height,
-    device_pixel_ratio: dpr,
+    device_pixel_ratio: native?.scale_factor || dpr,
     offset_left: offsetLeft,
     offset_top: offsetTop,
     orientation: cssWidth >= cssHeight ? 'landscape' : 'portrait',
+    native,
   };
 }
 
@@ -75,6 +78,23 @@ function installScreenMetricsWatcher() {
   window.addEventListener('orientationchange', update);
   window.visualViewport?.addEventListener('resize', update);
   window.visualViewport?.addEventListener('scroll', update);
+}
+
+async function syncNativeDisplayMetrics() {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (!invoke) {
+    return null;
+  }
+
+  try {
+    const metrics = await invoke('sync_display_metrics');
+    state.nativeDisplayMetrics = metrics;
+    applyScreenMetrics();
+    return metrics;
+  } catch (err) {
+    console.warn('Failed to sync native display metrics:', err);
+    return null;
+  }
 }
 
 // ── API helpers ───────────────────────────────────────────────────────────
@@ -736,6 +756,7 @@ async function waitForServer() {
 // ── Init ──────────────────────────────────────────────────────────────────
 window.App = App;
 window.getScreenMetrics = getScreenMetrics;
+window.syncNativeDisplayMetrics = syncNativeDisplayMetrics;
 
 // Append toast element
 const toastEl = document.createElement('div');
@@ -751,4 +772,4 @@ document.addEventListener('keydown', e => {
 });
 
 installScreenMetricsWatcher();
-waitForServer();
+syncNativeDisplayMetrics().finally(waitForServer);

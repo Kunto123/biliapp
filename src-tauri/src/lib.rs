@@ -13,6 +13,22 @@ struct BackendStatus {
     script: String,
 }
 
+#[derive(Clone, Default, Serialize)]
+struct DisplayMetrics {
+    monitor_width: u32,
+    monitor_height: u32,
+    monitor_x: i32,
+    monitor_y: i32,
+    scale_factor: f64,
+    css_width: u32,
+    css_height: u32,
+    window_inner_width: u32,
+    window_inner_height: u32,
+    window_outer_width: u32,
+    window_outer_height: u32,
+    fullscreen: bool,
+}
+
 struct PythonServer {
     child: Mutex<Option<Child>>,
     status: Mutex<BackendStatus>,
@@ -26,6 +42,45 @@ fn get_api_url() -> String {
 #[tauri::command]
 fn get_backend_status(state: State<PythonServer>) -> BackendStatus {
     state.status.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn sync_display_metrics(window: tauri::WebviewWindow) -> Result<DisplayMetrics, String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|err| err.to_string())?
+        .or(window.primary_monitor().map_err(|err| err.to_string())?)
+        .ok_or_else(|| "No monitor available".to_string())?;
+
+    let monitor_size = *monitor.size();
+    let monitor_pos = *monitor.position();
+    let scale_factor = monitor.scale_factor();
+
+    let _ = window.set_decorations(false);
+    let _ = window.set_resizable(true);
+    let _ = window.set_fullscreen(false);
+    let _ = window.set_position(monitor_pos);
+    let _ = window.set_size(monitor_size);
+    let _ = window.set_fullscreen(true);
+
+    let inner = window.inner_size().map_err(|err| err.to_string())?;
+    let outer = window.outer_size().map_err(|err| err.to_string())?;
+    let fullscreen = window.is_fullscreen().unwrap_or(false);
+
+    Ok(DisplayMetrics {
+        monitor_width: monitor_size.width,
+        monitor_height: monitor_size.height,
+        monitor_x: monitor_pos.x,
+        monitor_y: monitor_pos.y,
+        scale_factor,
+        css_width: (monitor_size.width as f64 / scale_factor).round() as u32,
+        css_height: (monitor_size.height as f64 / scale_factor).round() as u32,
+        window_inner_width: inner.width,
+        window_inner_height: inner.height,
+        window_outer_width: outer.width,
+        window_outer_height: outer.height,
+        fullscreen,
+    })
 }
 
 #[tauri::command]
@@ -173,7 +228,12 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![get_api_url, get_backend_status, exit_app])
+        .invoke_handler(tauri::generate_handler![
+            get_api_url,
+            get_backend_status,
+            sync_display_metrics,
+            exit_app
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
