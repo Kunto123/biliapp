@@ -323,6 +323,12 @@ html, body {
 #screen-home {
   background: #000;
 }
+#screen-home.active {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: var(--app-height);
+}
 
 .home-body {
   flex: 1;
@@ -498,7 +504,7 @@ html, body {
 }
 
 .camera-controls {
-  position: absolute;
+  position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
@@ -507,7 +513,8 @@ html, body {
   align-items: center;
   padding: 16px max(28px, env(safe-area-inset-right)) calc(18px + env(safe-area-inset-bottom)) max(28px, env(safe-area-inset-left));
   background: linear-gradient(to top, rgba(0,0,0,0.72), rgba(0,0,0,0));
-  z-index: 5;
+  z-index: 50;
+  pointer-events: none;
 }
 
 .thumb-button,
@@ -517,6 +524,7 @@ html, body {
   cursor: pointer;
   font-family: inherit;
   -webkit-tap-highlight-color: transparent;
+  pointer-events: auto;
 }
 
 .thumb-button {
@@ -747,35 +755,36 @@ html, body {
   .result-num { font-size: 42px; }
 
   .camera-controls {
-    top: 0;
-    bottom: 0;
-    left: auto;
-    right: 0;
-    width: clamp(104px, 18vw, 142px);
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto 1fr;
-    justify-items: center;
-    padding: max(14px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) 18px;
-    background: linear-gradient(to left, rgba(0,0,0,0.72), rgba(0,0,0,0));
+    top: auto;
+    width: auto;
+    grid-template-columns: 1fr auto 1fr;
+    grid-template-rows: none;
+    padding: 10px max(20px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+    background: linear-gradient(to top, rgba(0,0,0,0.76), rgba(0,0,0,0));
   }
-  .thumb-button { align-self: start; justify-self: center; }
-  .settings-round { align-self: end; justify-self: center; }
+  .thumb-button { align-self: center; justify-self: start; }
+  .settings-round { align-self: center; justify-self: end; }
+  .thumb-button,
+  .settings-round {
+    width: 48px;
+    height: 48px;
+  }
   .capture-round {
-    width: 72px;
-    height: 72px;
+    width: 64px;
+    height: 64px;
   }
   .capture-round::before {
-    width: 58px;
-    height: 58px;
+    width: 52px;
+    height: 52px;
   }
 
   .corner-tr,
   .corner-br {
-    right: clamp(118px, 20vw, 156px);
+    right: 22px;
   }
   .corner-bl,
   .corner-br {
-    bottom: 22px;
+    bottom: 92px;
   }
 }
 
