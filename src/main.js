@@ -33,6 +33,7 @@ async function apiFetch(method, path, body) {
 }
 const apiGet  = (path)       => apiFetch('GET',  path);
 const apiPost = (path, body) => apiFetch('POST', path, body);
+const apiPut  = (path, body) => apiFetch('PUT',  path, body);
 
 async function getBackendStartStatus() {
   try {
@@ -117,6 +118,28 @@ function updateLastThumb() {
     img.style.display = 'none';
     empty.style.display = 'block';
   }
+}
+
+function resolutionValue(res) {
+  if (!res) return '';
+  const width = Array.isArray(res) ? res[0] : res.width;
+  const height = Array.isArray(res) ? res[1] : res.height;
+  return `${width}x${height}`;
+}
+
+function parseResolutionValue(value) {
+  const [width, height] = String(value).split('x').map(v => parseInt(v, 10));
+  return { width, height };
+}
+
+function optionHtml(value, label, selectedValue) {
+  const selected = String(value) === String(selectedValue) ? ' selected' : '';
+  return `<option value="${value}"${selected}>${label}</option>`;
+}
+
+function renderResolutionOptions(selectedValue, presets) {
+  const values = presets.includes(selectedValue) ? presets : [selectedValue, ...presets].filter(Boolean);
+  return values.map(value => optionHtml(value, value, selectedValue)).join('');
 }
 
 function startCamera() {
@@ -321,7 +344,7 @@ const App = {
             title: 'RUNTIME',
             rows: [
               ['Device',    runtime.device_profile ?? 'desktop'],
-              ['Preview',   runtime.preview_fps ? `${runtime.preview_fps} FPS` : '?'],
+              ['Preview',   runtime.preview_fps != null ? (runtime.preview_fps === 0 ? 'Auto' : `${runtime.preview_fps} FPS`) : '?'],
               ['Server',    s.initialized ? 'Aktif' : 'Tidak aktif'],
             ],
           },
@@ -352,27 +375,100 @@ const App = {
       const content = document.getElementById('camera-config-content');
       content.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-sub)">Memuat…</div>`;
       try {
-        const s   = await apiGet('/api/status');
-        const cam = s.camera ?? {};
-        const runtime = s.runtime_config ?? {};
+        const [configResp, devicesResp, statusResp] = await Promise.all([
+          apiGet('/api/camera/config'),
+          apiGet('/api/camera/devices'),
+          apiGet('/api/status'),
+        ]);
+        const settings = configResp.settings ?? {};
+        const devices = devicesResp.devices ?? [];
+        const cam = statusResp.camera ?? {};
+        const previewValue = resolutionValue(settings.preview_resolution);
+        const captureValue = resolutionValue(settings.capture_resolution);
+        const fpsValue = settings.fps ?? 0;
+        const cameraIndex = settings.camera_index ?? 0;
+        const deviceOptions = devices.length
+          ? devices.map(d => {
+              const details = d.width && d.height ? ` - ${d.width}x${d.height}${d.fps ? ` @ ${d.fps} FPS` : ''}` : '';
+              return optionHtml(d.index, `${d.name ?? `Camera ${d.index}`}${details}`, cameraIndex);
+            }).join('')
+          : optionHtml(cameraIndex, `Camera ${cameraIndex}`, cameraIndex);
         content.innerHTML = `
           <div class="card">
             ${infoRow('Status',   cam.status   ?? '?')}
             ${infoRow('Tipe',     cam.camera_type ?? '?')}
             ${infoRow('Resolusi', cam.frame_size ? JSON.stringify(cam.frame_size) : '?')}
             ${infoRow('FPS',      cam.fps != null ? String(parseFloat(cam.fps).toFixed(0)) : '?')}
-            ${infoRow('Preview',  runtime.preview_fps ? `${runtime.preview_fps} FPS` : '?')}
+          </div>
+          <div class="card camera-form">
+            <label class="field-row">
+              <span>Kamera</span>
+              <select id="camera-index-select">${deviceOptions}</select>
+            </label>
+            <label class="field-row">
+              <span>Resolusi preview</span>
+              <select id="preview-resolution-select">
+                ${renderResolutionOptions(previewValue, ['320x240', '640x480', '1280x720'])}
+              </select>
+            </label>
+            <label class="field-row">
+              <span>Resolusi capture</span>
+              <select id="capture-resolution-select">
+                ${renderResolutionOptions(captureValue, ['1280x720', '1920x1080', '3840x2160'])}
+              </select>
+            </label>
+            <label class="field-row">
+              <span>FPS</span>
+              <select id="camera-fps-select">
+                ${optionHtml(0, 'Auto', fpsValue)}
+                ${optionHtml(15, '15 FPS', fpsValue)}
+                ${optionHtml(24, '24 FPS', fpsValue)}
+                ${optionHtml(30, '30 FPS', fpsValue)}
+                ${optionHtml(60, '60 FPS', fpsValue)}
+              </select>
+            </label>
+          </div>
+          <div class="button-stack">
+            <button class="btn btn-primary" onclick="App.saveCameraConfig()">Simpan & Terapkan</button>
+            <button class="btn btn-secondary" onclick="App.goCameraConfig()">Scan Ulang Kamera</button>
           </div>
           <button class="btn btn-primary" style="width:100%; margin-top:4px" onclick="App.reconnectCamera()">
             🔄 Sambung Ulang Kamera
           </button>
           <div class="info-panel" style="margin-top:10px">
-            Konfigurasi lanjutan (resolusi, brightness) diatur di file src/config.py.
+            Setting disimpan di data/camera_settings.json dan akan dipakai kembali saat aplikasi dibuka.
           </div>`;
       } catch {
         content.innerHTML = `<div style="padding:20px; color:var(--err)">Gagal memuat info kamera.</div>`;
       }
     });
+  },
+
+  async saveCameraConfig() {
+    const cameraIndexEl = document.getElementById('camera-index-select');
+    const previewEl = document.getElementById('preview-resolution-select');
+    const captureEl = document.getElementById('capture-resolution-select');
+    const fpsEl = document.getElementById('camera-fps-select');
+    if (!cameraIndexEl || !previewEl || !captureEl || !fpsEl) return;
+
+    const payload = {
+      camera_index: parseInt(cameraIndexEl.value, 10),
+      preview_resolution: parseResolutionValue(previewEl.value),
+      capture_resolution: parseResolutionValue(captureEl.value),
+      fps: parseInt(fpsEl.value, 10),
+    };
+
+    try {
+      const r = await apiPut('/api/camera/config', payload);
+      if (r.success) {
+        toast('Setting kamera diterapkan');
+        await this.goCameraConfig();
+      } else {
+        toast(r.error || r.detail || 'Gagal menerapkan setting kamera');
+      }
+    } catch {
+      toast('Gagal menghubungi server');
+    }
   },
 
   async reconnectCamera() {
@@ -448,16 +544,14 @@ const App = {
 
   // ── Exit ──────────────────────────────────────────────────────────────────
   async exitApp() {
-    if (confirm('Yakin ingin keluar dari aplikasi?')) {
-      if (window.__TAURI__?.core) {
-        try {
-          await window.__TAURI__.core.invoke('exit_app');
-        } catch {
-          window.close();
-        }
-      } else {
+    if (window.__TAURI__?.core) {
+      try {
+        await window.__TAURI__.core.invoke('exit_app');
+      } catch {
         window.close();
       }
+    } else {
+      window.close();
     }
   },
 };

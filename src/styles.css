@@ -192,6 +192,44 @@ html, body {
   line-height: 1.55;
 }
 
+.camera-form {
+  padding: 4px 0;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.field-row + .field-row { border-top: 1px solid var(--divider); }
+.field-row span {
+  min-width: 118px;
+  color: var(--text-sub);
+  font-size: 12px;
+}
+.field-row select {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--white);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 0 10px;
+}
+
+.button-stack {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+.button-stack .btn {
+  width: 100%;
+}
+
 /* ── Status strip ──────────────────────────────────────────────────────── */
 .status-strip {
   background: var(--panel);

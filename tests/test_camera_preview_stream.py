@@ -53,6 +53,21 @@ class CameraPreviewStreamTests(unittest.TestCase):
         stream._frame_times.extend([i / 20 for i in range(21)])
         self.assertFalse(stream.status()["fps_ok"])
 
+    def test_store_jpeg_updates_frame_metadata(self):
+        stream = CameraPreviewStream(camera_type=CameraType.OPENCV, fps=30, min_fps=30)
+
+        stream._store_jpeg(b"\xff\xd8one\xff\xd9")
+        first_id, first_jpeg, first_at = stream.get_latest()
+        stream._store_jpeg(b"\xff\xd8two\xff\xd9")
+        second_id, second_jpeg, second_at = stream.get_latest()
+
+        self.assertEqual(first_id, 1)
+        self.assertEqual(second_id, 2)
+        self.assertEqual(first_jpeg, b"\xff\xd8one\xff\xd9")
+        self.assertEqual(second_jpeg, b"\xff\xd8two\xff\xd9")
+        self.assertGreaterEqual(second_at, first_at)
+        self.assertEqual(stream.status()["frame_id"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

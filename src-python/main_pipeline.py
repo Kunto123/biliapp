@@ -18,16 +18,13 @@ from image_storage import ImageStorage
 from config import (
     CAMERA_AUTO_EXPOSURE,
     CAMERA_BRIGHTNESS,
-    CAMERA_INDEX,
-    CAMERA_RESOLUTION,
-    CAMERA_ROTATION,
     CAMERA_TIMEOUT_SECONDS,
-    CAMERA_TYPE,
     MODEL_BACKEND,
     MODEL_INPUT_SIZE,
     MODEL_STAGE1_TFLITE_PATH,
     MODEL_STAGE2_TFLITE_PATH,
 )
+from camera_settings import get_camera_settings, resolution_tuple
 
 
 class BilirubinPredictionPipeline:
@@ -85,15 +82,17 @@ class BilirubinPredictionPipeline:
     def _init_configured_camera(self) -> Optional[CameraManager]:
         """Initialize the configured camera first, then fall back to auto-detect."""
         try:
-            camera_type = CameraType(CAMERA_TYPE)
+            settings = get_camera_settings()
+            camera_type = CameraType(settings["camera_type"])
             camera = CameraManager(
                 camera_type=camera_type,
-                camera_index=CAMERA_INDEX,
-                resolution=CAMERA_RESOLUTION,
+                camera_index=settings["camera_index"],
+                resolution=resolution_tuple(settings["capture_resolution"]),
                 brightness=CAMERA_BRIGHTNESS,
                 auto_exposure=CAMERA_AUTO_EXPOSURE,
                 timeout_seconds=CAMERA_TIMEOUT_SECONDS,
-                rotation=CAMERA_ROTATION,
+                rotation=settings["rotation"],
+                fps=settings["fps"],
             )
             if camera.is_open:
                 return camera
@@ -101,7 +100,11 @@ class BilirubinPredictionPipeline:
         except Exception as exc:
             self.last_error = str(exc)
 
-        return auto_detect_camera(rotation=CAMERA_ROTATION)
+        try:
+            settings = get_camera_settings()
+            return auto_detect_camera(rotation=settings["rotation"])
+        except Exception:
+            return auto_detect_camera()
 
     def capture_and_predict(self) -> Tuple[Optional[float], Dict]:
         """

@@ -5,6 +5,24 @@ from pathlib import Path
 import os
 
 
+def _is_raspberry_pi_hardware() -> bool:
+    """Detect Raspberry Pi via /proc/device-tree/model or /proc/cpuinfo (no env var needed)."""
+    try:
+        with open("/proc/device-tree/model", errors="replace") as f:
+            if "raspberry pi" in f.read().lower():
+                return True
+    except OSError:
+        pass
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if "raspberry pi" in line.lower():
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -55,8 +73,9 @@ IMAGES_DIR = PROJECT_ROOT / "data" / "captures"
 MODELS_DIR = PROJECT_ROOT
 
 # ===== DEVICE PROFILE =====
-DEVICE_PROFILE = os.getenv("BILIRUBIN_DEVICE", "desktop").strip().lower()
-IS_RASPBERRY_PI = DEVICE_PROFILE in {"raspi5", "raspberrypi5", "raspberry_pi_5", "pi5"}
+_IS_PI_HW = _is_raspberry_pi_hardware()
+DEVICE_PROFILE = os.getenv("BILIRUBIN_DEVICE", "raspi5" if _IS_PI_HW else "desktop").strip().lower()
+IS_RASPBERRY_PI = DEVICE_PROFILE in {"raspi5", "raspberrypi5", "raspberry_pi_5", "pi5", "raspi", "raspberrypi"} or _IS_PI_HW
 
 # Model paths
 MODEL_STAGE1_PATH = MODELS_DIR / "best_model_stage1.keras"
@@ -81,10 +100,10 @@ CAMERA_ROTATION = _env_rotation("BILIRUBIN_CAMERA_ROTATION", 180)
 CAMERA_AUTO_EXPOSURE = _env_bool("BILIRUBIN_CAMERA_AUTO_EXPOSURE", True)
 CAMERA_BRIGHTNESS = _env_float("BILIRUBIN_CAMERA_BRIGHTNESS", 0.0)
 CAMERA_TIMEOUT_SECONDS = _env_float("BILIRUBIN_CAMERA_TIMEOUT_SECONDS", 8.0 if IS_RASPBERRY_PI else 20.0)
-PREVIEW_POLL_MS = _env_int("BILIRUBIN_PREVIEW_POLL_MS", 33 if IS_RASPBERRY_PI else 250)
+PREVIEW_POLL_MS = _env_int("BILIRUBIN_PREVIEW_POLL_MS", 33)  # 33ms ≈ 30fps pada semua platform
 PREVIEW_JPEG_QUALITY = _env_int("BILIRUBIN_PREVIEW_JPEG_QUALITY", 65 if IS_RASPBERRY_PI else 70)
-PREVIEW_FPS = _env_int("BILIRUBIN_PREVIEW_FPS", 30)
-PREVIEW_MIN_FPS = _env_int("BILIRUBIN_PREVIEW_MIN_FPS", 30)
+PREVIEW_FPS = _env_int("BILIRUBIN_PREVIEW_FPS", 0)       # 0 = auto-detect from camera
+PREVIEW_MIN_FPS = _env_int("BILIRUBIN_PREVIEW_MIN_FPS", 5)  # lenient; real check via detected FPS
 
 # ===== PREPROCESSING =====
 PREPROCESSING_TARGET_SIZE = 512  # Warp card to 512x512

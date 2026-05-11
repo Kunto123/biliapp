@@ -23,26 +23,28 @@ sys.path.insert(0, str(SRC_DIR))
 # BASE_DIR = bili-app/ (parent dari src-python/)
 BASE_DIR = SRC_DIR.parent
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 
-from camera_manager import CameraPreviewStream, CameraType
+from camera_manager import CameraPreviewStream, CameraType, scan_opencv_devices
+from camera_settings import (
+    DEFAULT_SETTINGS_PATH,
+    get_camera_settings,
+    load_camera_settings,
+    normalize_camera_settings,
+    resolution_tuple,
+    save_camera_settings,
+)
 from main_pipeline import BilirubinPredictionPipeline
 from config import (
-    CAMERA_PREVIEW_RESOLUTION,
-    CAMERA_ROTATION,
-    CAMERA_TYPE,
     DEVICE_PROFILE,
     GATECHECK_MIN_BLUR_SCORE,
     MODEL_BACKEND,
     MODEL_STAGE1_TFLITE_PATH,
     MODEL_STAGE2_TFLITE_PATH,
-    PREVIEW_FPS,
-    PREVIEW_JPEG_QUALITY,
-    PREVIEW_MIN_FPS,
     PREVIEW_POLL_MS,
     USE_STAGE2,
 )
@@ -62,6 +64,8 @@ preview_cache_b64: Optional[str] = None
 preview_cache_at: float = 0.0
 preview_focus_score: Optional[float] = None
 preview_focus_ok: Optional[bool] = None
+preview_focus_frame_id: int = 0
+preview_focus_at: float = 0.0
 preview_stream: Optional[CameraPreviewStream] = None
 preview_clients = 0
 camera_lock = threading.RLock()
@@ -72,8 +76,16 @@ def _camera_is_available() -> bool:
     return pipeline is not None and pipeline.camera is not None and pipeline.camera.is_open
 
 
+def _active_camera_settings() -> dict:
+    return get_camera_settings()
+
+
+def _preview_resolution() -> tuple[int, int]:
+    return resolution_tuple(_active_camera_settings()["preview_resolution"])
+
+
 def _prepare_preview_frame(frame):
-    width, height = CAMERA_PREVIEW_RESOLUTION
+    width, height = _preview_resolution()
     if frame.shape[1] != width or frame.shape[0] != height:
         return cv2.resize(frame, (width, height))
     return frame
@@ -89,7 +101,11 @@ def _calculate_focus_score(frame) -> float:
 
 def _encode_preview_frame(frame):
     frame = _prepare_preview_frame(frame)
-    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY])
+    _, buf = cv2.imencode(
+        ".jpg",
+        frame,
+        [cv2.IMWRITE_JPEG_QUALITY, _active_camera_settings()["jpeg_quality"]],
+    )
     return base64.b64encode(buf).decode()
 
 
@@ -104,22 +120,44 @@ def _update_preview_cache(frame, timestamp: Optional[float] = None) -> None:
     preview_frame = _prepare_preview_frame(frame)
     preview_focus_score = _calculate_focus_score(preview_frame)
     preview_focus_ok = preview_focus_score >= GATECHECK_MIN_BLUR_SCORE
-    _, buf = cv2.imencode(".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY])
+    _, buf = cv2.imencode(
+        ".jpg",
+        preview_frame,
+        [cv2.IMWRITE_JPEG_QUALITY, _active_camera_settings()["jpeg_quality"]],
+    )
     preview_cache_b64 = base64.b64encode(buf).decode()
     preview_cache_at = timestamp if timestamp is not None else time.monotonic()
 
 
-def _update_preview_cache_from_jpeg(jpeg: bytes, timestamp: Optional[float] = None) -> None:
+def _update_preview_cache_from_jpeg(
+    jpeg: bytes,
+    timestamp: Optional[float] = None,
+    frame_id: Optional[int] = None,
+    force_focus: bool = False,
+) -> None:
     global preview_cache_b64, preview_cache_at, preview_focus_score, preview_focus_ok
+    global preview_focus_frame_id, preview_focus_at
 
-    frame = _decode_jpeg(jpeg)
-    if frame is not None:
-        preview_frame = _prepare_preview_frame(frame)
-        preview_focus_score = _calculate_focus_score(preview_frame)
-        preview_focus_ok = preview_focus_score >= GATECHECK_MIN_BLUR_SCORE
+    now = timestamp if timestamp is not None else time.monotonic()
+    should_update_focus = force_focus
+    if frame_id is None:
+        should_update_focus = should_update_focus or (now - preview_focus_at) >= 0.25
+    else:
+        should_update_focus = should_update_focus or (
+            frame_id != preview_focus_frame_id and (now - preview_focus_at) >= 0.25
+        )
+
+    if should_update_focus:
+        frame = _decode_jpeg(jpeg)
+        if frame is not None:
+            preview_frame = _prepare_preview_frame(frame)
+            preview_focus_score = _calculate_focus_score(preview_frame)
+            preview_focus_ok = preview_focus_score >= GATECHECK_MIN_BLUR_SCORE
+            preview_focus_at = now
+            preview_focus_frame_id = frame_id or preview_focus_frame_id
 
     preview_cache_b64 = base64.b64encode(jpeg).decode()
-    preview_cache_at = timestamp if timestamp is not None else time.monotonic()
+    preview_cache_at = now
 
 
 def _preview_payload(frame_b64: Optional[str], available: bool, **extra):
@@ -135,7 +173,7 @@ def _preview_payload(frame_b64: Optional[str], available: bool, **extra):
 
 def _configured_camera_type() -> CameraType:
     try:
-        return CameraType(CAMERA_TYPE)
+        return CameraType(_active_camera_settings()["camera_type"])
     except ValueError:
         camera = getattr(pipeline, "camera", None)
         return getattr(camera, "camera_type", CameraType.OPENCV)
@@ -143,18 +181,19 @@ def _configured_camera_type() -> CameraType:
 
 def _create_preview_stream() -> CameraPreviewStream:
     camera = getattr(pipeline, "camera", None)
+    settings = _active_camera_settings()
     camera_type = getattr(camera, "camera_type", _configured_camera_type())
-    camera_index = getattr(camera, "camera_index", 0)
-    rotation = getattr(camera, "rotation", CAMERA_ROTATION)
+    camera_index = getattr(camera, "camera_index", settings["camera_index"])
+    rotation = getattr(camera, "rotation", settings["rotation"])
 
     return CameraPreviewStream(
         camera_type=camera_type,
         camera_index=camera_index,
-        resolution=CAMERA_PREVIEW_RESOLUTION,
-        fps=PREVIEW_FPS,
-        min_fps=PREVIEW_MIN_FPS,
+        resolution=resolution_tuple(settings["preview_resolution"]),
+        fps=settings["fps"],
+        min_fps=settings["min_fps"],
         rotation=rotation,
-        jpeg_quality=PREVIEW_JPEG_QUALITY,
+        jpeg_quality=settings["jpeg_quality"],
     )
 
 
@@ -172,6 +211,32 @@ def _ensure_preview_stream() -> bool:
 def _stop_preview_stream() -> None:
     if preview_stream is not None:
         preview_stream.stop()
+
+
+def _clear_preview_cache() -> None:
+    global preview_cache_b64, preview_cache_at, preview_focus_score, preview_focus_ok
+    global preview_focus_frame_id, preview_focus_at
+    preview_cache_b64 = None
+    preview_cache_at = 0.0
+    preview_focus_score = None
+    preview_focus_ok = None
+    preview_focus_frame_id = 0
+    preview_focus_at = 0.0
+
+
+def _preview_sleep_seconds(stream: Optional[CameraPreviewStream] = None) -> float:
+    target_fps = 0
+    if stream is not None:
+        status = stream.status()
+        for value in (status.get("target_fps"), status.get("detected_fps"), status.get("fps")):
+            if isinstance(value, (int, float)) and value > 0:
+                target_fps = int(value)
+                break
+    if target_fps <= 0:
+        target_fps = _active_camera_settings()["fps"]
+    if target_fps > 0:
+        return max(1.0 / min(target_fps, 120), 0.005)
+    return max(PREVIEW_POLL_MS / 1000.0, 0.005)
 
 
 def _reset_camera_if_needed(force: bool = False) -> bool:
@@ -233,17 +298,27 @@ async def get_status():
     if pipeline is None:
         return {"initialized": False, "error": "Pipeline not ready"}
     status = pipeline.get_system_status()
+    camera_settings, settings_source = load_camera_settings()
     status["initialized"] = True
     status["runtime_config"] = {
         "device_profile": DEVICE_PROFILE,
         "model_backend": MODEL_BACKEND,
-        "camera_type": CAMERA_TYPE,
-        "camera_rotation": CAMERA_ROTATION,
+        "camera_type": camera_settings["camera_type"],
+        "camera_index": camera_settings["camera_index"],
+        "camera_rotation": camera_settings["rotation"],
         "preview_poll_ms": PREVIEW_POLL_MS,
-        "preview_resolution": CAMERA_PREVIEW_RESOLUTION,
-        "preview_fps": PREVIEW_FPS,
-        "preview_min_fps": PREVIEW_MIN_FPS,
-        "preview_jpeg_quality": PREVIEW_JPEG_QUALITY,
+        "preview_resolution": [
+            camera_settings["preview_resolution"]["width"],
+            camera_settings["preview_resolution"]["height"],
+        ],
+        "capture_resolution": [
+            camera_settings["capture_resolution"]["width"],
+            camera_settings["capture_resolution"]["height"],
+        ],
+        "preview_fps": camera_settings["fps"],
+        "preview_min_fps": camera_settings["min_fps"],
+        "preview_jpeg_quality": camera_settings["jpeg_quality"],
+        "camera_settings_source": settings_source,
         "use_stage2": USE_STAGE2,
     }
     # Pastikan serializable
@@ -254,6 +329,74 @@ async def get_status():
 
 
 # ── Camera ────────────────────────────────────────────────────────────────────
+
+class CameraSettingsPayload(BaseModel):
+    camera_type: Optional[str] = None
+    camera_index: Optional[int] = None
+    capture_resolution: Optional[dict] = None
+    preview_resolution: Optional[dict] = None
+    fps: Optional[int] = None
+    min_fps: Optional[int] = None
+    jpeg_quality: Optional[int] = None
+    rotation: Optional[int] = None
+
+
+@app.get("/api/camera/config")
+async def get_camera_config():
+    settings, source = load_camera_settings()
+    return {
+        "success": True,
+        "settings": settings,
+        "source": source,
+        "path": str(DEFAULT_SETTINGS_PATH),
+    }
+
+
+@app.put("/api/camera/config")
+async def update_camera_config(payload: CameraSettingsPayload):
+    global preview_stream
+    if pipeline is None:
+        return {"success": False, "error": "Pipeline tidak diinisialisasi"}
+
+    current = get_camera_settings()
+    merged = current.copy()
+    if hasattr(payload, "model_dump"):
+        merged.update(payload.model_dump(exclude_unset=True))
+    else:
+        merged.update(payload.dict(exclude_unset=True))
+
+    try:
+        normalized = normalize_camera_settings(merged)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    with camera_lock:
+        if capture_in_progress:
+            return {"success": False, "error": "Kamera sedang capture"}
+
+        try:
+            save_camera_settings(normalized)
+            _stop_preview_stream()
+            preview_stream = None
+            _clear_preview_cache()
+            camera = getattr(pipeline, "camera", None)
+            if camera is not None:
+                camera.release()
+            pipeline.camera = pipeline._init_configured_camera()
+            ok = _camera_is_available()
+            if ok:
+                _ensure_preview_stream()
+            return {"success": ok, "settings": normalized, "error": None if ok else pipeline.last_error}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "settings": normalized}
+
+
+@app.get("/api/camera/devices")
+async def get_camera_devices(max_index: int = 5):
+    max_index = max(0, min(int(max_index), 10))
+    devices = scan_opencv_devices(max_index=max_index)
+    return {"success": True, "devices": devices, "max_index": max_index}
+
 
 @app.get("/api/camera/frame")
 async def get_camera_frame():
@@ -274,7 +417,9 @@ async def get_camera_frame():
             return _preview_payload(None, False)
 
         _ensure_preview_stream()
-        jpeg = preview_stream.get_latest_jpeg() if preview_stream is not None else None
+        frame_id, jpeg, _updated_at = (
+            preview_stream.get_latest() if preview_stream is not None else (0, None, 0.0)
+        )
         if jpeg is None:
             return _preview_payload(
                 preview_cache_b64,
@@ -282,7 +427,7 @@ async def get_camera_frame():
                 warming_up=True,
             )
 
-        _update_preview_cache_from_jpeg(jpeg, now)
+        _update_preview_cache_from_jpeg(jpeg, now, frame_id=frame_id)
         return _preview_payload(preview_cache_b64, True, cached=False)
     finally:
         camera_lock.release()
@@ -312,15 +457,14 @@ async def stream_camera():
 
     async def generate():
         global preview_clients
-        last_frame = None
-        sleep_s = max(1.0 / max(PREVIEW_FPS, 1), 0.005)
+        last_frame_id = 0
 
         try:
             while True:
                 stream = preview_stream
-                jpeg = stream.get_latest_jpeg() if stream is not None else None
-                if jpeg is not None and jpeg != last_frame:
-                    last_frame = jpeg
+                frame_id, jpeg, _updated_at = stream.get_latest() if stream is not None else (0, None, 0.0)
+                if jpeg is not None and frame_id != last_frame_id:
+                    last_frame_id = frame_id
                     yield (
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n"
@@ -328,7 +472,7 @@ async def stream_camera():
                         + jpeg
                         + b"\r\n"
                     )
-                await asyncio.sleep(sleep_s)
+                await asyncio.sleep(_preview_sleep_seconds(stream))
         finally:
             with camera_lock:
                 preview_clients = max(0, preview_clients - 1)
@@ -347,22 +491,24 @@ async def get_preview_status():
         finally:
             camera_lock.release()
 
+    settings = _active_camera_settings()
     stream = preview_stream
     status = stream.status() if stream is not None else {
         "available": False,
         "running": False,
         "fps": None,
         "fps_ok": False,
-        "target_fps": PREVIEW_FPS,
-        "min_fps": PREVIEW_MIN_FPS,
-        "frame_size": CAMERA_PREVIEW_RESOLUTION,
+        "target_fps": settings["fps"],
+        "min_fps": settings["min_fps"],
+        "frame_size": resolution_tuple(settings["preview_resolution"]),
         "updated_at": 0.0,
+        "frame_id": 0,
         "error": None,
     }
 
-    jpeg = stream.get_latest_jpeg() if stream is not None else None
+    frame_id, jpeg, _updated_at = stream.get_latest() if stream is not None else (0, None, 0.0)
     if jpeg is not None:
-        _update_preview_cache_from_jpeg(jpeg)
+        _update_preview_cache_from_jpeg(jpeg, frame_id=frame_id)
 
     status.update({
         "available": bool(status.get("available")) and not capture_in_progress,
@@ -375,14 +521,11 @@ async def get_preview_status():
 
 @app.post("/api/camera/reconnect")
 async def reconnect_camera():
-    global preview_cache_b64, preview_cache_at, preview_focus_score, preview_focus_ok, preview_stream
+    global preview_stream
     with camera_lock:
         _stop_preview_stream()
         preview_stream = None
-        preview_cache_b64 = None
-        preview_cache_at = 0.0
-        preview_focus_score = None
-        preview_focus_ok = None
+        _clear_preview_cache()
         if pipeline is not None:
             pipeline.cleanup()
             pipeline.camera = pipeline._init_configured_camera()
