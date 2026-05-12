@@ -36,10 +36,33 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
    pip install --force-reinstall -r requirements-rpi.txt
    ```
 
-4. Convert model artifacts on a desktop/dev machine with TensorFlow installed:
+4. Convert model artifacts on a desktop/dev machine with TensorFlow installed.
+
+   Use the regular desktop requirements for conversion. Do not do this in the
+   Raspberry Pi `.venv-lin`, because the Pi environment intentionally does not
+   install TensorFlow.
    ```bash
+   python -m venv .venv-convert
+   . .venv-convert/bin/activate
+   pip install -U pip
+   pip install -r requirements.txt
    python scripts/convert_models_to_tflite.py
    ```
+
+   If pip reports conflicts with an older `tensorflow-intel`, `keras`,
+   `ml-dtypes`, `numpy`, `protobuf`, or `tensorboard`, the conversion venv is
+   dirty. Delete it and recreate it, or purge those packages before reinstalling:
+   ```bash
+   pip uninstall -y tensorflow tensorflow-intel keras ml-dtypes numpy protobuf tensorboard
+   pip install --no-cache-dir --force-reinstall -r requirements.txt
+   ```
+
+   The checked-in `.keras` models were saved with Keras 3.10.0, while the Pi
+   runtime uses `tflite-runtime==2.14.0`. If the generated `.tflite` still fails
+   with an unsupported op version, re-export the model from the original
+   training/export environment to a TensorFlow 2.14-compatible format before
+   converting for Pi.
+
    Copy the generated `models/best_model_stage1.tflite` and `models/best_model_stage2.tflite` to the Raspberry Pi.
 
 5. Run the production app with Pi defaults:

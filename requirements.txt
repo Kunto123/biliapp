@@ -2,7 +2,12 @@
 # Install: pip install -r requirements.txt
 
 # ML framework
-tensorflow==2.21.0
+# The checked-in `.keras` models were saved with Keras 3.10.0.
+# TensorFlow 2.20 depends on Keras >=3.10 and is closer to those artifacts than
+# TensorFlow 2.21, which pulls Keras >=3.12.
+# Install this in a clean venv. Do not layer it over TensorFlow 2.14, because
+# `tensorflow-intel 2.14.x` requires incompatible keras/ml-dtypes/numpy/protobuf.
+tensorflow==2.20.0
 flatbuffers>=24.3.25
 
 # Image processing
