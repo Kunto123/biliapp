@@ -48,6 +48,7 @@ from config import (
     PREVIEW_POLL_MS,
     USE_STAGE2,
 )
+from gpio_manager import gpio_manager
 
 app = FastAPI(title="Bilirubin API", version="1.0.0")
 app.add_middleware(
@@ -283,12 +284,16 @@ async def startup():
     except Exception as e:
         print(f"[api] ✗ Pipeline init failed: {e}")
 
+    gpio_manager.start()
+    print(f"[api] GPIO available: {gpio_manager.available}")
+
 @app.on_event("shutdown")
 async def shutdown():
     with camera_lock:
         _stop_preview_stream()
         if pipeline:
             pipeline.cleanup()
+    gpio_manager.stop()
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -537,16 +542,16 @@ async def reconnect_camera():
 
 # ── Prediction ────────────────────────────────────────────────────────────────
 
-@app.post("/api/capture")
-async def capture_and_predict():
+async def _execute_capture() -> dict:
+    """Core capture+predict logic. Manages flash LED and GPIO re-arm state."""
     global capture_in_progress
-    if pipeline is None:
-        return {"success": False, "error": "Pipeline tidak diinisialisasi"}
 
     with camera_lock:
         restart_preview = preview_stream is not None and preview_stream.is_running
         _stop_preview_stream()
         capture_in_progress = True
+        gpio_manager.mark_captured()   # block re-capture until GPIO 8 returns HIGH
+        gpio_manager.set_flash(True)   # flash ON during capture
         try:
             prediction, result = pipeline.capture_and_predict()
             if result.get("timestamp"):
@@ -571,9 +576,36 @@ async def capture_and_predict():
 
             return result
         finally:
+            gpio_manager.set_flash(False)  # flash OFF after capture
             capture_in_progress = False
             if restart_preview and _camera_is_available():
                 _ensure_preview_stream()
+
+
+@app.post("/api/capture")
+async def capture_and_predict():
+    if pipeline is None:
+        return {"success": False, "error": "Pipeline tidak diinisialisasi"}
+
+    # Consume any GPIO trigger flag set by the limit switch monitor
+    gpio_manager.consume_trigger()
+
+    # When GPIO is wired: block if switch has not returned HIGH since last capture
+    if gpio_manager.available and not gpio_manager.capture_ready:
+        return {
+            "success": False,
+            "error": "Menunggu sensor — lepaskan limit switch (GPIO 8) terlebih dahulu",
+            "gpio_blocked": True,
+        }
+
+    return await _execute_capture()
+
+
+# ── GPIO ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/gpio/status")
+async def get_gpio_status():
+    return gpio_manager.get_status()
 
 
 # ── History & Stats ───────────────────────────────────────────────────────────

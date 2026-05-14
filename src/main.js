@@ -25,6 +25,8 @@ const state = {
   lastFocusScore: null,
   screenMetrics: null,
   nativeDisplayMetrics: null,
+  gpioAvailable: false,  // true when RPi GPIO is active
+  gpioReady: true,       // false = waiting for limit switch to return HIGH
 };
 
 // ── Runtime viewport measurement ─────────────────────────────────────────
@@ -216,6 +218,13 @@ function renderResolutionOptions(selectedValue, presets) {
   return values.map(value => optionHtml(value, value, selectedValue)).join('');
 }
 
+function updateCaptureButton() {
+  const btn = document.getElementById('btn-capture');
+  if (!btn) return;
+  const gpioBlocked = state.gpioAvailable && !state.gpioReady;
+  btn.disabled = gpioBlocked || state.isCapturing;
+}
+
 function startCamera() {
   stopCamera();
   updateLastThumb();
@@ -244,7 +253,23 @@ function startCamera() {
       return;
     }
     try {
-      const d = await apiGet('/api/camera/preview/status');
+      const [d, gpioData] = await Promise.all([
+        apiGet('/api/camera/preview/status'),
+        apiGet('/api/gpio/status').catch(() => null),
+      ]);
+
+      // Update GPIO state and handle auto-trigger from limit switch
+      if (gpioData) {
+        state.gpioAvailable = !!gpioData.available;
+        state.gpioReady = gpioData.capture_ready !== false;
+        if (gpioData.capture_triggered && state.gpioReady && !state.isCapturing) {
+          state.cameraStatusTimer = setTimeout(tickStatus, state.previewStatusMs);
+          App.startCapture();
+          return;
+        }
+      }
+      updateCaptureButton();
+
       if (d.available) {
         img.style.display = 'block';
         ph.style.display  = 'none';
@@ -255,6 +280,16 @@ function startCamera() {
         ph.style.display  = 'flex';
         setFocusState(null, null);
         setCameraStatus(d);
+      }
+
+      // GPIO waiting message overrides camera status
+      if (state.gpioAvailable && !state.gpioReady) {
+        const el = document.getElementById('camera-status');
+        if (el) {
+          el.textContent = 'Menunggu sensor — lepaskan limit switch (GPIO 8)';
+          el.classList.remove('is-warn');
+          el.classList.add('is-visible', 'is-idle');
+        }
       }
     } catch {
       setFocusState(null, null);
@@ -300,10 +335,13 @@ const App = {
   // ── Capture ─────────────────────────────────────────────────────────────
   async startCapture() {
     if (state.isCapturing) return;
+    if (state.gpioAvailable && !state.gpioReady) {
+      toast('Sensor belum siap — tunggu limit switch kembali ke posisi awal');
+      return;
+    }
     state.isCapturing = true;
     stopCamera();
-    const btn = document.getElementById('btn-capture');
-    btn.disabled = true;
+    updateCaptureButton();
 
     // Show capture screen with loading indicator
     showScreen('screen-capture');
@@ -325,7 +363,7 @@ const App = {
         </div>`;
     } finally {
       state.isCapturing = false;
-      btn.disabled = false;
+      updateCaptureButton();
     }
   },
 
