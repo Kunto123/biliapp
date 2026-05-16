@@ -1,13 +1,13 @@
 """
 gpio_manager.py
 
-GPIO 8: limit switch input (BCM, active-LOW, pull-up)
-  - 0 (LOW)  = switch ditekan → flash ON + capture triggered
-  - 1 (HIGH) = switch dilepas → flash OFF + re-arm
+GPIO 8: limit switch input (BCM, active-HIGH)
+  - 1 (HIGH) = switch ditekan → flash ON + capture triggered
+  - 0 (LOW)  = switch dilepas → flash OFF + re-arm
 
 GPIO 7: flash LED output (BCM)
-  - Nyala selama switch ditekan (BCM 8 = LOW)
-  - Mati saat switch dilepas  (BCM 8 = HIGH)
+  - Nyala selama switch ditekan (BCM 8 = HIGH)
+  - Mati saat switch dilepas  (BCM 8 = LOW)
 
 SPI kernel modules dinonaktifkan otomatis saat init agar BCM 7 & 8 bebas dipakai.
 Falls back gracefully saat lgpio tidak tersedia (desktop / Windows).
@@ -87,13 +87,16 @@ class GPIOManager:
         if self._thread:
             self._thread.join(timeout=2)
         if self._available and self._lgpio and self._h is not None:
+            # Matikan LED dulu SEBELUM melepas kontrol pin.
+            # gpio_free() mereset pin ke input → hardware bisa pull LED ke ON.
             try:
                 self._lgpio.gpio_write(self._h, _PIN_FLASH, 0)
-                self._lgpio.gpio_free(self._h, _PIN_SWITCH)
-                self._lgpio.gpio_free(self._h, _PIN_FLASH)
+            except Exception as exc:
+                logger.warning(f"[gpio] Gagal matikan flash saat stop: {exc}")
+            try:
                 self._lgpio.gpiochip_close(self._h)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"[gpio] Cleanup error: {exc}")
         logger.info("[gpio] Stopped")
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -134,7 +137,7 @@ class GPIOManager:
                 "available":         self._available,
                 "capture_ready":     self._capture_ready,
                 "capture_triggered": self._capture_triggered,
-                "switch_state":      switch_state,  # 0=ditekan, 1=dilepas, null=N/A
+                "switch_state":      switch_state,  # 1=ditekan, 0=dilepas, null=N/A
                 "switch_pin":        _PIN_SWITCH,
                 "flash_pin":         _PIN_FLASH,
             }
@@ -147,23 +150,23 @@ class GPIOManager:
 
         prev = lgpio.gpio_read(h, _PIN_SWITCH)
         # Sync flash ke state awal switch (kalau switch sudah ditekan saat start)
-        lgpio.gpio_write(h, _PIN_FLASH, 1 if prev == 0 else 0)
+        lgpio.gpio_write(h, _PIN_FLASH, 1 if prev == 1 else 0)
 
         while self._running:
             try:
                 curr = lgpio.gpio_read(h, _PIN_SWITCH)
                 if curr != prev:
-                    if curr == 0:  # switch ditekan (LOW) → flash ON + trigger
+                    if curr == 1:  # switch ditekan (HIGH) → flash ON + trigger
                         lgpio.gpio_write(h, _PIN_FLASH, 1)
                         with self._lock:
                             if self._capture_ready:
                                 self._capture_triggered = True
-                        logger.info("[gpio] Switch LOW — flash ON, capture triggered")
-                    else:          # switch dilepas (HIGH) → flash OFF + re-arm
+                        logger.info("[gpio] Switch HIGH — flash ON, capture triggered")
+                    else:          # switch dilepas (LOW) → flash OFF + re-arm
                         lgpio.gpio_write(h, _PIN_FLASH, 0)
                         with self._lock:
                             self._capture_ready = True
-                        logger.info("[gpio] Switch HIGH — flash OFF, capture re-armed")
+                        logger.info("[gpio] Switch LOW — flash OFF, capture re-armed")
                     prev = curr
                 time.sleep(0.02)  # 20 ms polling / debounce
             except Exception as exc:
