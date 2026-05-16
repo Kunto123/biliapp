@@ -1,23 +1,52 @@
 #!/bin/bash
-# launch-gui.sh — tunggu backend siap, lalu buka GUI
+# launch-gui.sh
+# Urutan: tunggu Wayland compositor → tunggu backend API → buka GUI
 
 BINARY="/home/bilirubin/BiliApp/biliapp/src-tauri/target/release/bili-app"
 API_URL="http://localhost:7878/api/gpio/status"
-MAX_WAIT=30  # detik maksimal menunggu backend
+USER_ID=$(id -u)
+export XDG_RUNTIME_DIR="/run/user/${USER_ID}"
 
-echo "[gui] Menunggu backend siap..."
-elapsed=0
+# ── 1. Tunggu Wayland compositor siap ─────────────────────────────────────────
+echo "[gui] Menunggu Wayland compositor..."
+WAYLAND_FOUND=0
+ELAPSED=0
+
+while [ $ELAPSED -lt 60 ]; do
+    for NAME in wayland-1 wayland-0; do
+        if [ -S "${XDG_RUNTIME_DIR}/${NAME}" ]; then
+            export WAYLAND_DISPLAY="${NAME}"
+            WAYLAND_FOUND=1
+            echo "[gui] Compositor siap: ${NAME} (${ELAPSED}s)"
+            break 2
+        fi
+    done
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+
+if [ $WAYLAND_FOUND -eq 0 ]; then
+    echo "[gui] Compositor timeout — coba lanjut tanpa Wayland"
+fi
+
+# ── 2. Beri jeda agar compositor stabil menerima window request ───────────────
+sleep 4
+
+# ── 3. Tunggu backend API siap ────────────────────────────────────────────────
+echo "[gui] Menunggu backend API..."
+ELAPSED=0
+
 until curl -s "$API_URL" > /dev/null 2>&1; do
     sleep 1
-    elapsed=$((elapsed + 1))
-    if [ "$elapsed" -ge "$MAX_WAIT" ]; then
-        echo "[gui] Backend tidak merespons setelah ${MAX_WAIT}s, tetap lanjut..."
+    ELAPSED=$((ELAPSED + 1))
+    if [ $ELAPSED -ge 30 ]; then
+        echo "[gui] Backend timeout (${ELAPSED}s) — tetap lanjut"
         break
     fi
 done
 
-echo "[gui] Backend siap (${elapsed}s). Tunggu window manager..."
-sleep 3  # beri waktu window manager fully ready
+[ $ELAPSED -lt 30 ] && echo "[gui] Backend siap (${ELAPSED}s)"
 
+# ── 4. Buka GUI ───────────────────────────────────────────────────────────────
 echo "[gui] Membuka GUI..."
-exec "$BINARY" --window-size=480,854
+exec "$BINARY"
