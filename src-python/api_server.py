@@ -543,15 +543,14 @@ async def reconnect_camera():
 # ── Prediction ────────────────────────────────────────────────────────────────
 
 async def _execute_capture() -> dict:
-    """Core capture+predict logic. Manages flash LED and GPIO re-arm state."""
+    """Core capture+predict logic. Flash dikontrol langsung oleh switch di gpio_manager."""
     global capture_in_progress
 
     with camera_lock:
         restart_preview = preview_stream is not None and preview_stream.is_running
         _stop_preview_stream()
         capture_in_progress = True
-        gpio_manager.mark_captured()   # block re-capture until GPIO 8 returns HIGH
-        gpio_manager.set_flash(True)   # flash ON during capture
+        gpio_manager.mark_captured()   # blokir re-capture sampai switch dilepas
         try:
             prediction, result = pipeline.capture_and_predict()
             if result.get("timestamp"):
@@ -576,7 +575,6 @@ async def _execute_capture() -> dict:
 
             return result
         finally:
-            gpio_manager.set_flash(False)  # flash OFF after capture
             capture_in_progress = False
             if restart_preview and _camera_is_available():
                 _ensure_preview_stream()

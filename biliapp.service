@@ -1,0 +1,25 @@
+[Unit]
+Description=BiliApp - Bilirubin Detection Server
+After=network.target
+
+[Service]
+Type=simple
+User=bilirubin
+WorkingDirectory=/home/bilirubin/BiliApp/biliapp/src-python
+
+# Nonaktifkan SPI sebelum start (+ = jalankan sebagai root)
+ExecStartPre=+/sbin/modprobe -r spidev
+ExecStartPre=+/sbin/modprobe -r spi_bcm2835
+
+# Jalankan server pakai Python dari venv
+ExecStart=/home/bilirubin/BiliApp/biliapp/.venv-lin/bin/python api_server.py
+
+# Restart otomatis kalau crash
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
