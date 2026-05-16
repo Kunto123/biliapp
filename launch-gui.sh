@@ -16,5 +16,8 @@ until curl -s "$API_URL" > /dev/null 2>&1; do
     fi
 done
 
-echo "[gui] Backend siap (${elapsed}s). Membuka GUI..."
-exec "$BINARY"
+echo "[gui] Backend siap (${elapsed}s). Tunggu window manager..."
+sleep 3  # beri waktu window manager fully ready
+
+echo "[gui] Membuka GUI..."
+exec "$BINARY" --window-size=480,854
