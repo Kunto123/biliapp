@@ -1,10 +1,13 @@
 """
-Runtime camera settings persisted outside source-controlled config.
+Runtime camera settings.
+
+config.py adalah satu-satunya sumber kebenaran untuk semua parameter.
+Perubahan via API tersimpan di memori (_runtime_overrides) dan hilang saat restart.
+Untuk perubahan permanen: edit config.py lalu restart server.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -18,6 +21,9 @@ from config import (
     PREVIEW_JPEG_QUALITY,
     PREVIEW_MIN_FPS,
 )
+
+# Perubahan runtime via API disimpan di sini (in-memory, reset saat restart)
+_runtime_overrides: dict[str, Any] = {}
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -111,26 +117,25 @@ def normalize_camera_settings(raw: Optional[dict[str, Any]] = None) -> dict[str,
     }
 
 
-def load_camera_settings(path: Path = DEFAULT_SETTINGS_PATH) -> tuple[dict[str, Any], str]:
-    if not path.exists():
-        return normalize_camera_settings(), "defaults"
+def load_camera_settings() -> tuple[dict[str, Any], str]:
+    # Selalu mulai dari config.py, lalu terapkan override runtime (jika ada)
+    settings = default_camera_settings()
+    if _runtime_overrides:
+        settings.update(_runtime_overrides)
+        return normalize_camera_settings(settings), "runtime"
+    return normalize_camera_settings(settings), "config"
 
-    with path.open("r", encoding="utf-8") as handle:
-        raw = json.load(handle)
-    return normalize_camera_settings(raw), "file"
 
-
-def get_camera_settings(path: Path = DEFAULT_SETTINGS_PATH) -> dict[str, Any]:
-    settings, _source = load_camera_settings(path)
+def get_camera_settings() -> dict[str, Any]:
+    settings, _source = load_camera_settings()
     return settings
 
 
-def save_camera_settings(settings: dict[str, Any], path: Path = DEFAULT_SETTINGS_PATH) -> dict[str, Any]:
+def save_camera_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    global _runtime_overrides
     normalized = normalize_camera_settings(settings)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(normalized, handle, indent=2)
-        handle.write("\n")
+    # Simpan di memori saja — tidak ada file JSON yang dibuat
+    _runtime_overrides = dict(normalized)
     return normalized
 
 
