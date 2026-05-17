@@ -85,7 +85,7 @@ MODEL_STAGE2_TFLITE_PATH = MODELS_DIR / "models" / "best_model_stage2.tflite"
 
 # ===== MODEL CONFIGURATION =====
 MODEL_BACKEND = os.getenv("BILIRUBIN_MODEL_BACKEND", "tflite" if IS_RASPBERRY_PI else "keras").strip().lower()
-USE_STAGE2 = _env_bool("BILIRUBIN_USE_STAGE2", not IS_RASPBERRY_PI)
+USE_STAGE2 = _env_bool("BILIRUBIN_USE_STAGE2", True)
 MODEL_INPUT_SIZE = (224, 224)  # Input size for EfficientNetB0
 
 # ===== CAMERA CONFIGURATION =====
