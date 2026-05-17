@@ -299,6 +299,13 @@ html, body {
 .result-unit  { font-size: 18px; font-weight: 600; margin-top: 2px; }
 .result-hr    { height: 2px; margin: 10px 24px; border: none; }
 .result-level { font-size: 13px; font-weight: 700; padding-bottom: 4px; }
+.result-clinical-note {
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: -2px 0 10px;
+  text-align: center;
+}
 .gate-list {
   text-align: left;
   font-size: 13px;

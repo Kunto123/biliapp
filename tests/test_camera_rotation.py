@@ -50,6 +50,15 @@ class CameraRotationTests(unittest.TestCase):
         camera.rotation = 180
         camera.timeout_seconds = 1
         camera.error_message = None
+        camera.capture_timeout_ms = 3000
+        camera.capture_shutter_us = 8000
+        camera.capture_gain = 8.0
+        camera.capture_awb_gains = ""
+        camera.capture_af_mode = "auto"
+        camera.capture_af_range = "normal"
+        camera.capture_af_speed = "normal"
+        camera.capture_af_on_capture = True
+        camera.capture_immediate = False
 
         with mock.patch("camera_manager.subprocess.run", return_value=proc) as run:
             frame = camera._capture_libcamera_frame()
@@ -57,8 +66,53 @@ class CameraRotationTests(unittest.TestCase):
         cmd = run.call_args.args[0]
         rotation_index = cmd.index("--rotation")
         self.assertEqual(cmd[rotation_index + 1], "180")
+        self.assertEqual(cmd[cmd.index("--timeout") + 1], "3000")
+        self.assertIn("--autofocus-on-capture", cmd)
+        self.assertNotIn("--immediate", cmd)
         self.assertIsNotNone(frame)
         self.assertEqual(frame.shape[:2], (2, 3))
+
+    def test_rpicam_command_falls_back_without_autofocus_flags(self):
+        source = np.zeros((2, 3, 3), dtype=np.uint8)
+        ok, encoded = cv2.imencode(".jpg", source)
+        self.assertTrue(ok)
+
+        failed_proc = mock.Mock()
+        failed_proc.returncode = 1
+        failed_proc.stdout = b""
+        failed_proc.stderr = b"unrecognised option '--autofocus-on-capture'"
+
+        ok_proc = mock.Mock()
+        ok_proc.returncode = 0
+        ok_proc.stdout = encoded.tobytes()
+        ok_proc.stderr = b""
+
+        camera = CameraManager.__new__(CameraManager)
+        camera._rpicam_cmd = "rpicam-still"
+        camera.resolution = (3, 2)
+        camera.rotation = 180
+        camera.timeout_seconds = 1
+        camera.error_message = None
+        camera.capture_timeout_ms = 3000
+        camera.capture_shutter_us = 8000
+        camera.capture_gain = 8.0
+        camera.capture_awb_gains = ""
+        camera.capture_af_mode = "auto"
+        camera.capture_af_range = "normal"
+        camera.capture_af_speed = "normal"
+        camera.capture_af_on_capture = True
+        camera.capture_immediate = False
+
+        with mock.patch.object(camera, "_run_libcamera_command", side_effect=[failed_proc, ok_proc]) as run:
+            frame = camera._capture_libcamera_frame()
+
+        first_cmd = run.call_args_list[0].args[0]
+        second_cmd = run.call_args_list[1].args[0]
+        self.assertIn("--autofocus-on-capture", first_cmd)
+        self.assertNotIn("--autofocus-on-capture", second_cmd)
+        self.assertNotIn("--autofocus-mode", second_cmd)
+        self.assertIsNone(camera.error_message)
+        self.assertIsNotNone(frame)
 
     def test_opencv_rotation_applies_after_capture(self):
         camera = CameraManager.__new__(CameraManager)

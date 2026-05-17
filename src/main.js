@@ -8,6 +8,11 @@ const API = 'http://127.0.0.1:7878';
 const DEFAULT_PREVIEW_POLL_MS = 33;
 const DEFAULT_PREVIEW_STATUS_MS = 500;
 const CAMERA_CONTROLS_SPACE = 118;
+const RISK_BANDS = [
+  { min: 17, className: 'sev-err', label: 'TINGGI - perlu evaluasi klinis' },
+  { min: 12, className: 'sev-warn', label: 'MENINGKAT - perlu konfirmasi' },
+  { min: 0, className: 'sev-ok', label: 'RENDAH - interpretasikan sesuai usia bayi' },
+];
 
 // ── State ─────────────────────────────────────────────────────────────────
 const state = {
@@ -689,6 +694,13 @@ function esc(str) {
     .replace(/>/g, '&gt;');
 }
 
+function classifyBilirubin(value) {
+  if (!Number.isFinite(value)) {
+    return { className: 'sev-err', label: 'HASIL TIDAK VALID' };
+  }
+  return RISK_BANDS.find(band => value >= band.min) ?? RISK_BANDS[RISK_BANDS.length - 1];
+}
+
 function renderCaptureResult(result) {
   const content = document.getElementById('capture-content');
   if (result?.image_b64) {
@@ -720,18 +732,18 @@ function renderCaptureResult(result) {
     return;
   }
 
-  const bili = parseFloat(result.bilirubin_prediction);
-  let sevClass, level;
-  if (bili >= 17) {
-    sevClass = 'sev-err';
-    level = 'TINGGI — Konsultasi Dokter';
-  } else if (bili >= 12) {
-    sevClass = 'sev-warn';
-    level = 'PERHATIAN — Pantau Lebih Lanjut';
-  } else {
-    sevClass = 'sev-ok';
-    level = 'NORMAL — Dalam Batas Aman';
+  const bili = Number.parseFloat(result.bilirubin_prediction);
+  if (!Number.isFinite(bili)) {
+    content.innerHTML = `
+      <div class="result-card sev-err" style="padding:16px 20px">
+        <div style="font-size:18px; font-weight:700; margin-bottom:8px">Prediksi Gagal</div>
+        <div style="font-size:13px">Nilai bilirubin dari server tidak valid.</div>
+      </div>`;
+    return;
   }
+  const risk = classifyBilirubin(bili);
+  const sevClass = risk.className;
+  const level = risk.label;
 
   const ts   = result.timestamp ? result.timestamp.slice(0, 19).replace('T', '  ') : '-';
   const qual = `${String(result.quality_label ?? '?').toUpperCase()}  (${result.quality_score ?? 0}/100)`;
@@ -754,6 +766,7 @@ function renderCaptureResult(result) {
       <hr class="result-hr" style="background:currentColor">
       <div class="result-level">${level}</div>
     </div>
+    <div class="result-clinical-note">Skrining awal. Interpretasi klinis tetap perlu mempertimbangkan usia bayi dalam jam, berat badan, prematuritas, dan pemeriksaan tenaga kesehatan.</div>
     ${rawAlignedBanner}
     ${logWarnBanner}
     <div class="card">

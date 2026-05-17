@@ -41,6 +41,9 @@ from camera_settings import (
 from main_pipeline import BilirubinPredictionPipeline
 from config import (
     DEVICE_PROFILE,
+    CAMERA_CAPTURE_IMMEDIATE,
+    CAMERA_CAPTURE_RETRIES,
+    CAMERA_CAPTURE_TIMEOUT_MS,
     GATECHECK_MIN_BLUR_SCORE,
     MODEL_BACKEND,
     MODEL_STAGE1_TFLITE_PATH,
@@ -281,9 +284,9 @@ async def startup():
             tflite_stage1_path=str(MODEL_STAGE1_TFLITE_PATH),
             tflite_stage2_path=str(MODEL_STAGE2_TFLITE_PATH),
         )
-        print("[api] ✓ Pipeline initialized")
+        print("[api] Pipeline initialized")
     except Exception as e:
-        print(f"[api] ✗ Pipeline init failed: {e}")
+        print(f"[api] Pipeline init failed: {e}")
 
     gpio_manager.start()
     print(f"[api] GPIO available: {gpio_manager.available}")
@@ -324,6 +327,9 @@ async def get_status():
         "preview_fps": camera_settings["fps"],
         "preview_min_fps": camera_settings["min_fps"],
         "preview_jpeg_quality": camera_settings["jpeg_quality"],
+        "capture_timeout_ms": CAMERA_CAPTURE_TIMEOUT_MS,
+        "capture_retries": CAMERA_CAPTURE_RETRIES,
+        "capture_immediate": CAMERA_CAPTURE_IMMEDIATE,
         "camera_settings_source": settings_source,
         "use_stage2": USE_STAGE2,
     }

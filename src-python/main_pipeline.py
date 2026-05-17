@@ -4,6 +4,9 @@ main_pipeline.py
 Main pipeline orchestrator: camera -> preprocess -> predict -> log -> return results
 """
 
+import json
+import time
+
 import cv2
 import numpy as np
 from pathlib import Path
@@ -18,6 +21,9 @@ from image_storage import ImageStorage
 from config import (
     CAMERA_AUTO_EXPOSURE,
     CAMERA_BRIGHTNESS,
+    CAMERA_CAPTURE_RETRIES,
+    CAMERA_CAPTURE_RETRY_DELAY_MS,
+    CAMERA_SAVE_FAILED_CAPTURES,
     CAMERA_TIMEOUT_SECONDS,
     MODEL_BACKEND,
     MODEL_INPUT_SIZE,
@@ -106,14 +112,8 @@ class BilirubinPredictionPipeline:
         except Exception:
             return auto_detect_camera()
 
-    def capture_and_predict(self) -> Tuple[Optional[float], Dict]:
-        """
-        Single-shot: capture image -> predict -> log.
-        
-        Returns:
-            (predicted_bilirubin_value, result_info_dict)
-        """
-        result = {
+    def _new_capture_result(self) -> Dict:
+        return {
             "success": False,
             "bilirubin_prediction": None,
             "image_path": None,
@@ -128,86 +128,161 @@ class BilirubinPredictionPipeline:
             "model_backend": self.prediction_engine.model_backend,
             "model_used": None,
             "inference_time_ms": None,
+            "capture_attempt": 1,
+            "capture_attempts": max(1, int(CAMERA_CAPTURE_RETRIES)),
             "error": None,
             "timestamp": datetime.now()
         }
 
+    def _safe_json_notes(self, payload: Dict, max_len: int = 900) -> str:
         try:
-            # Step 1: Capture image
-            if self.camera is None:
-                result["error"] = "Camera not initialized"
-                self.last_error = result["error"]
-                return None, result
+            notes = json.dumps(payload, ensure_ascii=True, default=str, separators=(",", ":"))
+        except Exception:
+            notes = str(payload)
+        return notes if len(notes) <= max_len else notes[: max_len - 3] + "..."
 
-            image_bgr = self.camera.capture_image()
-            result["timestamp"] = datetime.now()  # Timestamp set after actual capture
-            if image_bgr is None:
-                result["error"] = f"Camera capture failed: {self.camera.error_message}"
-                self.last_error = result["error"]
-                return None, result
+    def _save_capture_if_needed(self, image_bgr: np.ndarray, result: Dict, prefix: str) -> Tuple[bool, str]:
+        if result.get("success") is False and not CAMERA_SAVE_FAILED_CAPTURES:
+            return False, ""
 
-            # Step 2: Predict
-            prediction, pred_info = self.prediction_engine.predict_from_image(image_bgr, return_diagnostics=True)
+        save_ok, image_path = self.storage.save_image(
+            image_bgr,
+            prefix=prefix,
+            timestamp=result["timestamp"],
+        )
+        if save_ok:
+            result["image_path"] = image_path
+        else:
+            result["image_save_warning"] = image_path
+        return save_ok, image_path
 
-            if prediction is None:
-                result["error"] = pred_info.get("error", "Prediction failed")
-                result["success"] = False
+    def _log_capture_result(self, result: Dict, image_path: str = "") -> bool:
+        notes = self._safe_json_notes({
+            "attempt": result.get("capture_attempt"),
+            "attempts": result.get("capture_attempts"),
+            "model_used": result.get("model_used"),
+            "inference_ms": result.get("inference_time_ms"),
+            "gatecheck_errors": result.get("gatecheck_errors", []),
+            "gatecheck_warnings": result.get("gatecheck_warnings", []),
+            "quality_flags": result.get("quality_flags", {}),
+        })
+        return self.logger.log_prediction(
+            timestamp=result["timestamp"],
+            image_filename=Path(image_path).name if image_path else "",
+            image_path=image_path,
+            bilirubin_prediction=result.get("bilirubin_prediction"),
+            preprocessing_mode=result.get("preprocessing_mode") or "",
+            quality_label=result.get("quality_label") or "",
+            quality_score=int(result.get("quality_score") or 0),
+            success=bool(result.get("success")),
+            error_message=result.get("error"),
+            model_version=f"bilirubin_v1_{result.get('model_backend', self.prediction_engine.model_backend)}",
+            notes=notes,
+        )
+
+    def _should_retry_failed_capture(self, result: Dict) -> bool:
+        if result.get("success"):
+            return False
+
+        if result.get("gatecheck_passed") is False:
+            return True
+
+        error_text = str(result.get("error") or "").lower()
+        retry_terms = ("blur", "exposure", "palette", "checkerboard", "kartu", "capture failed")
+        return any(term in error_text for term in retry_terms)
+
+    def capture_and_predict(self) -> Tuple[Optional[float], Dict]:
+        """
+        Single-shot: capture image -> predict -> log.
+        
+        Returns:
+            (predicted_bilirubin_value, result_info_dict)
+        """
+        attempts = max(1, int(CAMERA_CAPTURE_RETRIES))
+        last_result = None
+
+        for attempt in range(1, attempts + 1):
+            result = self._new_capture_result()
+            result["capture_attempt"] = attempt
+            result["capture_attempts"] = attempts
+            last_result = result
+
+            try:
+                # Step 1: Capture image
+                if self.camera is None:
+                    result["error"] = "Camera not initialized"
+                    self.last_error = result["error"]
+                    return None, result
+
+                image_bgr = self.camera.capture_image()
+                result["timestamp"] = datetime.now()  # Timestamp set after actual capture
+                if image_bgr is None:
+                    result["error"] = f"Camera capture failed: {self.camera.error_message}"
+                    self.last_error = result["error"]
+                    if attempt < attempts:
+                        time.sleep(max(0, CAMERA_CAPTURE_RETRY_DELAY_MS) / 1000.0)
+                        continue
+                    return None, result
+
+                # Step 2: Predict
+                prediction, pred_info = self.prediction_engine.predict_from_image(
+                    image_bgr,
+                    return_diagnostics=True,
+                )
+
+                if prediction is None:
+                    result["error"] = pred_info.get("error", "Prediction failed")
+                    result["success"] = False
+                    result["preprocessing_mode"] = pred_info.get("preprocessing_mode", "unknown")
+                    result["quality_label"] = pred_info.get("quality_label", "failed")
+                    result["quality_score"] = pred_info.get("quality_score", 0)
+                    result["gatecheck_passed"] = pred_info.get("gatecheck_passed")
+                    result["gatecheck_errors"] = pred_info.get("gatecheck_errors", [])
+                    result["gatecheck_warnings"] = pred_info.get("gatecheck_warnings", [])
+                    result["palette_detected"] = pred_info.get("palette_detected", False)
+                    result["quality_flags"] = pred_info.get("quality_flags", {})
+                    result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
+
+                    save_ok, image_path = self._save_capture_if_needed(image_bgr, result, prefix="rejected")
+                    log_ok = self._log_capture_result(result, image_path if save_ok else "")
+                    if not log_ok:
+                        result["log_warning"] = f"Gagal menulis log: {self.logger.last_write_error}"
+
+                    self.last_error = result["error"]
+                    if attempt < attempts and self._should_retry_failed_capture(result):
+                        time.sleep(max(0, CAMERA_CAPTURE_RETRY_DELAY_MS) / 1000.0)
+                        continue
+                    return None, result
+
+                # Step 3: Save and log successful prediction
+                result["success"] = True
+                result["bilirubin_prediction"] = prediction
                 result["preprocessing_mode"] = pred_info.get("preprocessing_mode", "unknown")
-                result["quality_label"] = pred_info.get("quality_label", "failed")
+                result["quality_label"] = pred_info.get("quality_label", "unknown")
                 result["quality_score"] = pred_info.get("quality_score", 0)
-                result["gatecheck_passed"] = pred_info.get("gatecheck_passed")
+                result["quality_flags"] = pred_info.get("quality_flags", {})
+                result["gatecheck_passed"] = pred_info.get("gatecheck_passed", True)
                 result["gatecheck_errors"] = pred_info.get("gatecheck_errors", [])
                 result["gatecheck_warnings"] = pred_info.get("gatecheck_warnings", [])
                 result["palette_detected"] = pred_info.get("palette_detected", False)
-                result["quality_flags"] = pred_info.get("quality_flags", {})
                 result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
+                result["model_used"] = pred_info.get("model_used")
+                result["inference_time_ms"] = pred_info.get("inference_time_ms")
+                result["error"] = None
 
-                self.last_error = result["error"]
+                save_ok, image_path = self._save_capture_if_needed(image_bgr, result, prefix="capture")
+                log_ok = self._log_capture_result(result, image_path if save_ok else "")
+                if not log_ok:
+                    result["log_warning"] = f"Gagal menulis log: {self.logger.last_write_error}"
+
+                return prediction, result
+
+            except Exception as e:
+                self.last_error = str(e)
+                result["error"] = self.last_error
                 return None, result
 
-            # Step 3: Save and log successful prediction only
-            result["success"] = True
-            result["bilirubin_prediction"] = prediction
-            result["preprocessing_mode"] = pred_info.get("preprocessing_mode", "unknown")
-            result["quality_label"] = pred_info.get("quality_label", "unknown")
-            result["quality_score"] = pred_info.get("quality_score", 0)
-            result["quality_flags"] = pred_info.get("quality_flags", {})
-            result["gatecheck_passed"] = pred_info.get("gatecheck_passed", True)
-            result["gatecheck_errors"] = pred_info.get("gatecheck_errors", [])
-            result["gatecheck_warnings"] = pred_info.get("gatecheck_warnings", [])
-            result["palette_detected"] = pred_info.get("palette_detected", False)
-            result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
-            result["model_used"] = pred_info.get("model_used")
-            result["inference_time_ms"] = pred_info.get("inference_time_ms")
-            result["error"] = None
-
-            timestamp = result["timestamp"]
-            save_ok, image_path = self.storage.save_image(image_bgr, prefix="capture", timestamp=timestamp)
-            if save_ok:
-                result["image_path"] = image_path
-
-            log_ok = self.logger.log_prediction(
-                timestamp=timestamp,
-                image_filename=Path(image_path).name if save_ok else "",
-                image_path=image_path if save_ok else "",
-                bilirubin_prediction=prediction,
-                preprocessing_mode=result["preprocessing_mode"],
-                quality_label=result["quality_label"],
-                quality_score=int(result["quality_score"]),
-                success=True,
-                error_message=None,
-                model_version=f"bilirubin_v1_{result['model_backend']}",
-                notes=f"model_used={result['model_used']}; inference_ms={result['inference_time_ms']}"
-            )
-            if not log_ok:
-                result["log_warning"] = f"Gagal menulis log: {self.logger.last_write_error}"
-
-            return prediction, result
-
-        except Exception as e:
-            self.last_error = str(e)
-            result["error"] = self.last_error
-            return None, result
+        return None, last_result or self._new_capture_result()
 
     def predict_from_file(self, image_path: str) -> Tuple[Optional[float], Dict]:
         """

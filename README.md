@@ -100,6 +100,12 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
    curl -X POST http://127.0.0.1:7878/api/capture
    ```
 
+   For image-processing QA without loading the ML model:
+   ```bash
+   pip install -r requirements-test.txt
+   python scripts/qa_image_pipeline.py --json
+   ```
+
 7. Enable autostart after GUI login:
    ```bash
    ./scripts/install-raspi-autostart.sh
@@ -116,7 +122,16 @@ Useful Raspberry Pi environment overrides:
 - `BILIRUBIN_PREVIEW_FPS=30`
 - `BILIRUBIN_PREVIEW_MIN_FPS=30`
 - `BILIRUBIN_PREVIEW_POLL_MS=500`
+- `BILIRUBIN_CAPTURE_TIMEOUT_MS=3000`
+- `BILIRUBIN_CAPTURE_RETRIES=2`
+- `BILIRUBIN_CAPTURE_SHUTTER_US=8000`
+- `BILIRUBIN_CAPTURE_GAIN=8`
+- `BILIRUBIN_CAPTURE_AF_MODE=auto`
+- `BILIRUBIN_CAPTURE_AF_ON_CAPTURE=1`
+- `BILIRUBIN_CAPTURE_IMMEDIATE=0`
 - `BILIRUBIN_MIN_BLUR_SCORE=60`
 - `BILIRUBIN_MAX_RAW_PALETTE_MAE=95`
 
 Capture gatecheck rejects images before inference when the card, checkerboard, gray patches, color palette, exposure, blur, or skin ROI is not acceptable.
+Failed gatecheck captures are saved with a `rejected_` prefix and logged, so blur/palette failures can be audited after testing.
+Keep `BILIRUBIN_CAPTURE_IMMEDIATE=0` for palette work; immediate capture skips camera settling and can make focus/AWB less reliable.

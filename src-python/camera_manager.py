@@ -18,6 +18,18 @@ import subprocess
 import threading
 import time
 
+from config import (
+    CAMERA_CAPTURE_AF_MODE,
+    CAMERA_CAPTURE_AF_ON_CAPTURE,
+    CAMERA_CAPTURE_AF_RANGE,
+    CAMERA_CAPTURE_AF_SPEED,
+    CAMERA_CAPTURE_AWB_GAINS,
+    CAMERA_CAPTURE_GAIN,
+    CAMERA_CAPTURE_IMMEDIATE,
+    CAMERA_CAPTURE_SHUTTER_US,
+    CAMERA_CAPTURE_TIMEOUT_MS,
+)
+
 VALID_CAMERA_ROTATIONS = {0, 90, 180, 270}
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
@@ -402,6 +414,15 @@ class CameraManager:
         timeout_seconds: float = 20.0,
         rotation: int = 0,
         fps: int = 0,
+        capture_timeout_ms: int = CAMERA_CAPTURE_TIMEOUT_MS,
+        capture_shutter_us: int = CAMERA_CAPTURE_SHUTTER_US,
+        capture_gain: float = CAMERA_CAPTURE_GAIN,
+        capture_awb_gains: str = CAMERA_CAPTURE_AWB_GAINS,
+        capture_af_mode: str = CAMERA_CAPTURE_AF_MODE,
+        capture_af_range: str = CAMERA_CAPTURE_AF_RANGE,
+        capture_af_speed: str = CAMERA_CAPTURE_AF_SPEED,
+        capture_af_on_capture: bool = CAMERA_CAPTURE_AF_ON_CAPTURE,
+        capture_immediate: bool = CAMERA_CAPTURE_IMMEDIATE,
     ):
         """
         Initialize camera.
@@ -423,6 +444,15 @@ class CameraManager:
         self.rotation = self._normalize_rotation(rotation)
         self.requested_fps = max(0, int(fps))
         self._capture_fps: float = 30.0  # Probed at init; used when cap is not held
+        self.capture_timeout_ms = max(0, int(capture_timeout_ms))
+        self.capture_shutter_us = max(0, int(capture_shutter_us))
+        self.capture_gain = max(0.0, float(capture_gain))
+        self.capture_awb_gains = (capture_awb_gains or "").strip()
+        self.capture_af_mode = (capture_af_mode or "").strip().lower()
+        self.capture_af_range = (capture_af_range or "").strip().lower()
+        self.capture_af_speed = (capture_af_speed or "").strip().lower()
+        self.capture_af_on_capture = bool(capture_af_on_capture)
+        self.capture_immediate = bool(capture_immediate)
 
         self.cap = None
         self._rpicam_cmd = None
@@ -526,40 +556,76 @@ class CameraManager:
             self.error_message = str(e)
             return False
 
-    def _capture_libcamera_frame(self) -> Optional[np.ndarray]:
-        """Capture one JPEG frame using rpicam/libcamera command line tools."""
+    def build_libcamera_still_command(self, include_autofocus: bool = True) -> Optional[list[str]]:
+        """Build a still-capture command that lets AE/AWB/AF settle by default."""
         if not self._rpicam_cmd:
-            self.error_message = "libcamera backend not initialized"
             return None
 
         width, height = self.resolution
         cmd = [
             self._rpicam_cmd,
             "-n",
-            "--timeout", "1500",           # 1.5s AE/AWB/AF warmup
-            "--autofocus-mode", "auto",    # trigger AF before capture (ArduCam 64MP)
-            "--shutter", "8000",           # 8ms = 1/125s — freeze hand movement
-            "--gain", "8",                 # boost analogue gain to compensate shorter exposure
-            "--width",
-            str(width),
-            "--height",
-            str(height),
-            "--rotation",
-            str(self.rotation),
-            "--encoding",
-            "jpg",
-            "-o",
-            "-",
+            "--timeout", str(self.capture_timeout_ms),
+            "--width", str(width),
+            "--height", str(height),
+            "--rotation", str(self.rotation),
+            "--encoding", "jpg",
+            "-o", "-",
         ]
 
+        if include_autofocus and self.capture_af_mode:
+            cmd += ["--autofocus-mode", self.capture_af_mode]
+        if include_autofocus and self.capture_af_on_capture:
+            cmd += ["--autofocus-on-capture"]
+        if include_autofocus and self.capture_af_range:
+            cmd += ["--autofocus-range", self.capture_af_range]
+        if include_autofocus and self.capture_af_speed:
+            cmd += ["--autofocus-speed", self.capture_af_speed]
+        if self.capture_shutter_us > 0:
+            cmd += ["--shutter", str(self.capture_shutter_us)]
+        if self.capture_gain > 0:
+            cmd += ["--gain", f"{self.capture_gain:g}"]
+        if self.capture_awb_gains:
+            cmd += ["--awbgains", self.capture_awb_gains]
+        if self.capture_immediate:
+            cmd += ["--immediate"]
+
+        return cmd
+
+    @staticmethod
+    def _stderr_indicates_unsupported_option(stderr: str) -> bool:
+        text = (stderr or "").lower()
+        markers = (
+            "unrecognised option",
+            "unrecognized option",
+            "unknown option",
+            "invalid option",
+            "not supported",
+        )
+        return any(marker in text for marker in markers)
+
+    def _run_libcamera_command(self, cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=self.timeout_seconds,
+        )
+
+    def _capture_libcamera_frame(self) -> Optional[np.ndarray]:
+        """Capture one JPEG frame using rpicam/libcamera command line tools."""
+        if not self._rpicam_cmd:
+            self.error_message = "libcamera backend not initialized"
+            return None
+
+        cmd = self.build_libcamera_still_command()
+        if not cmd:
+            self.error_message = "Failed to build rpicam command"
+            return None
+
         try:
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=self.timeout_seconds,
-            )
+            proc = self._run_libcamera_command(cmd)
         except subprocess.TimeoutExpired:
             self.error_message = "Timed out while capturing frame via rpicam"
             return None
@@ -569,8 +635,25 @@ class CameraManager:
 
         if proc.returncode != 0:
             stderr = proc.stderr.decode("utf-8", errors="ignore").strip()
-            self.error_message = f"rpicam failed ({proc.returncode}): {stderr}"
-            return None
+            if self._stderr_indicates_unsupported_option(stderr):
+                fallback_cmd = self.build_libcamera_still_command(include_autofocus=False)
+                if fallback_cmd:
+                    try:
+                        proc = self._run_libcamera_command(fallback_cmd)
+                    except subprocess.TimeoutExpired:
+                        self.error_message = "Timed out while capturing fallback frame via rpicam"
+                        return None
+                    except Exception as e:
+                        self.error_message = f"rpicam fallback invocation failed: {e}"
+                        return None
+                    if proc.returncode == 0:
+                        stderr = ""
+                    else:
+                        stderr = proc.stderr.decode("utf-8", errors="ignore").strip()
+            if proc.returncode != 0:
+                self.error_message = f"rpicam failed ({proc.returncode}): {stderr}"
+                return None
+            self.error_message = None
 
         if not proc.stdout:
             self.error_message = "rpicam returned empty output"
@@ -733,6 +816,14 @@ class CameraManager:
                 "auto_exposure": self.auto_exposure,
                 "timeout_seconds": self.timeout_seconds,
                 "camera_rotation": self.rotation,
+                "capture_timeout_ms": self.capture_timeout_ms,
+                "capture_shutter_us": self.capture_shutter_us,
+                "capture_gain": self.capture_gain,
+                "capture_af_mode": self.capture_af_mode,
+                "capture_af_range": self.capture_af_range,
+                "capture_af_speed": self.capture_af_speed,
+                "capture_af_on_capture": self.capture_af_on_capture,
+                "capture_immediate": self.capture_immediate,
                 "capture_command": self._rpicam_cmd,
                 "error": None
             }
