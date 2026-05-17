@@ -17,11 +17,14 @@ import subprocess
 import threading
 import time
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _PIN_SWITCH = 8   # BCM 8 — limit switch (input, pull-up)
 _PIN_FLASH  = 7   # BCM 7 — flash LED (output)
+
+_STUCK_SWITCH_TIMEOUT = 15.0  # seconds — force re-arm if switch stays HIGH this long after capture
 
 
 class GPIOManager:
@@ -149,8 +152,9 @@ class GPIOManager:
         h = self._h
 
         prev = lgpio.gpio_read(h, _PIN_SWITCH)
-        # Sync flash ke state awal switch (kalau switch sudah ditekan saat start)
         lgpio.gpio_write(h, _PIN_FLASH, 1 if prev == 1 else 0)
+
+        stuck_since: Optional[float] = None  # monotonic timestamp when NOT-ready + HIGH began
 
         while self._running:
             try:
@@ -166,9 +170,28 @@ class GPIOManager:
                         lgpio.gpio_write(h, _PIN_FLASH, 0)
                         with self._lock:
                             self._capture_ready = True
+                        stuck_since = None
                         logger.info("[gpio] Switch LOW — flash OFF, capture re-armed")
                     prev = curr
-                time.sleep(0.02)  # 20 ms polling / debounce
+
+                # Stuck-switch guard: if _capture_ready is False and switch stays HIGH
+                # longer than _STUCK_SWITCH_TIMEOUT, force re-arm to unblock the system.
+                with self._lock:
+                    ready = self._capture_ready
+                if not ready and curr == 1:
+                    if stuck_since is None:
+                        stuck_since = time.monotonic()
+                    elif time.monotonic() - stuck_since > _STUCK_SWITCH_TIMEOUT:
+                        with self._lock:
+                            self._capture_ready = True
+                        stuck_since = None
+                        logger.warning(
+                            "[gpio] Switch stuck HIGH >%ss — force re-armed", _STUCK_SWITCH_TIMEOUT
+                        )
+                else:
+                    stuck_since = None
+
+                time.sleep(0.02)
             except Exception as exc:
                 logger.warning(f"[gpio] Monitor loop error: {exc}")
                 time.sleep(0.1)

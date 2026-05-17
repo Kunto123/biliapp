@@ -310,6 +310,17 @@ html, body {
   font-size: 12px;
   color: var(--warn);
 }
+.result-mode-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  text-align: center;
+}
 
 /* ── History table ─────────────────────────────────────────────────────── */
 .history-table {

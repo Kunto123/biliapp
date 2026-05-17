@@ -140,6 +140,7 @@ class BilirubinPredictionPipeline:
                 return None, result
 
             image_bgr = self.camera.capture_image()
+            result["timestamp"] = datetime.now()  # Timestamp set after actual capture
             if image_bgr is None:
                 result["error"] = f"Camera capture failed: {self.camera.error_message}"
                 self.last_error = result["error"]
@@ -185,7 +186,7 @@ class BilirubinPredictionPipeline:
             if save_ok:
                 result["image_path"] = image_path
 
-            self.logger.log_prediction(
+            log_ok = self.logger.log_prediction(
                 timestamp=timestamp,
                 image_filename=Path(image_path).name if save_ok else "",
                 image_path=image_path if save_ok else "",
@@ -198,6 +199,8 @@ class BilirubinPredictionPipeline:
                 model_version=f"bilirubin_v1_{result['model_backend']}",
                 notes=f"model_used={result['model_used']}; inference_ms={result['inference_time_ms']}"
             )
+            if not log_ok:
+                result["log_warning"] = f"Gagal menulis log: {self.logger.last_write_error}"
 
             return prediction, result
 
@@ -246,7 +249,7 @@ class BilirubinPredictionPipeline:
             result["quality_score"] = pred_info.get("quality_score", 0)
 
             # Log
-            self.logger.log_prediction(
+            log_ok = self.logger.log_prediction(
                 timestamp=result["timestamp"],
                 image_filename=Path(image_path).name,
                 image_path=image_path,
@@ -258,6 +261,8 @@ class BilirubinPredictionPipeline:
                 error_message=None,
                 model_version="bilirubin_v1"
             )
+            if not log_ok:
+                result["log_warning"] = f"Gagal menulis log: {self.logger.last_write_error}"
 
             return prediction, result
 

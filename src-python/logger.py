@@ -5,10 +5,13 @@ Log bilirubin predictions and capture metadata to CSV/SQLite.
 """
 
 import csv
+import logging
 import sqlite3
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
+
+_log = logging.getLogger(__name__)
 
 
 class PredictionLogger:
@@ -22,6 +25,7 @@ class PredictionLogger:
         
         self.use_csv = use_csv
         self.use_sqlite = use_sqlite
+        self.last_write_error: Optional[str] = None
 
         # CSV file path
         self.csv_path = self.log_dir / "predictions.csv"
@@ -37,27 +41,22 @@ class PredictionLogger:
         if self.use_csv and not self.csv_path.exists():
             self._init_csv()
 
+    _CSV_FIELDNAMES = [
+        'timestamp', 'image_filename', 'image_path',
+        'bilirubin_prediction', 'preprocessing_mode',
+        'quality_label', 'quality_score', 'success',
+        'error_message', 'model_version', 'notes',
+    ]
+
     def _init_csv(self):
         """Create CSV file with header."""
         try:
-            with open(self.csv_path, 'w', newline='') as f:
-                fieldnames = [
-                    'timestamp',
-                    'image_filename',
-                    'image_path',
-                    'bilirubin_prediction',
-                    'preprocessing_mode',
-                    'quality_label',
-                    'quality_score',
-                    'success',
-                    'error_message',
-                    'model_version',
-                    'notes'
-                ]
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+            with open(self.csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=self._CSV_FIELDNAMES)
                 writer.writeheader()
+                f.flush()
         except Exception as e:
-            print(f"Error initializing CSV: {e}")
+            _log.warning("Error initializing CSV: %s", e)
 
     def _init_db(self):
         """Create SQLite database with predictions table."""
@@ -85,7 +84,7 @@ class PredictionLogger:
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"Error initializing SQLite: {e}")
+            _log.warning("Error initializing SQLite: %s", e)
 
     def log_prediction(self, **kwargs) -> bool:
         """
@@ -108,8 +107,9 @@ class PredictionLogger:
             True if logged successfully
         """
         try:
+            self.last_write_error = None
             timestamp = kwargs.get('timestamp') or datetime.now()
-            
+
             record = {
                 'timestamp': timestamp.isoformat(),
                 'image_filename': kwargs.get('image_filename', ''),
@@ -121,16 +121,18 @@ class PredictionLogger:
                 'success': kwargs.get('success', False),
                 'error_message': kwargs.get('error_message', ''),
                 'model_version': kwargs.get('model_version', ''),
-                'notes': kwargs.get('notes', '')
+                'notes': kwargs.get('notes', ''),
             }
 
-            # Log to CSV
             if self.use_csv:
-                with open(self.csv_path, 'a', newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=record.keys())
+                # Re-create header if file was deleted after startup
+                if not self.csv_path.exists():
+                    self._init_csv()
+                with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=self._CSV_FIELDNAMES)
                     writer.writerow(record)
+                    f.flush()
 
-            # Log to SQLite
             if self.use_sqlite:
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
@@ -141,17 +143,10 @@ class PredictionLogger:
                         error_message, model_version, notes
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    record['timestamp'],
-                    record['image_filename'],
-                    record['image_path'],
-                    record['bilirubin_prediction'],
-                    record['preprocessing_mode'],
-                    record['quality_label'],
-                    record['quality_score'],
-                    record['success'],
-                    record['error_message'],
-                    record['model_version'],
-                    record['notes']
+                    record['timestamp'], record['image_filename'], record['image_path'],
+                    record['bilirubin_prediction'], record['preprocessing_mode'],
+                    record['quality_label'], record['quality_score'], record['success'],
+                    record['error_message'], record['model_version'], record['notes'],
                 ))
                 conn.commit()
                 conn.close()
@@ -159,7 +154,8 @@ class PredictionLogger:
             return True
 
         except Exception as e:
-            print(f"Error logging prediction: {e}")
+            self.last_write_error = str(e)
+            _log.warning("Error logging prediction: %s", e)
             return False
 
     def get_last_predictions(self, num: int = 10) -> list:
@@ -169,7 +165,7 @@ class PredictionLogger:
                 return []
 
             records = []
-            with open(self.csv_path, 'r') as f:
+            with open(self.csv_path, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     records.append(row)
@@ -194,7 +190,10 @@ class PredictionLogger:
             import pandas as pd
             df = pd.read_csv(self.csv_path)
             
-            successful = df[df['success'] == True] if 'success' in df.columns else pd.DataFrame()
+            if 'success' in df.columns:
+                successful = df[df['success'].astype(str).str.strip().str.lower() == 'true']
+            else:
+                successful = pd.DataFrame()
             
             stats = {
                 'total_predictions': len(df),

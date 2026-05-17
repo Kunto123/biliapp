@@ -52,24 +52,26 @@ SHRINK_RATIOS = {
 }
 
 # ===== WHITE BALANCE REFERENCE (from training set) =====
-# Target gray level computed as median of gray patches in training data
-TARGET_GRAY_LEVEL = 127.5  # Median gray level from training set
+# Target gray level from printed gray patch: #737373 → R=G=B=115
+TARGET_GRAY_LEVEL = 115.0
 
-# Gray patch reference colors (median RGB from training set)
+# Gray patch reference colors — printed color: #737373 (R=115, G=115, B=115)
 GRAY_PATCHES_REFERENCE_DF = pd.DataFrame({
     "roi_name": ["gray_tl", "gray_tr", "gray_bl", "gray_br"],
-    "r_ref": [128.0, 128.5, 127.0, 128.2],  # Example values; replace with actual training means
-    "g_ref": [128.1, 128.3, 127.2, 128.1],
-    "b_ref": [128.2, 128.4, 127.1, 128.0],
+    "r_ref": [115.0, 115.0, 115.0, 115.0],
+    "g_ref": [115.0, 115.0, 115.0, 115.0],
+    "b_ref": [115.0, 115.0, 115.0, 115.0],
 })
 
 # ===== PALETTE CORRECTION REFERENCE (from training set) =====
-# Reference colors for 6 color patches extracted from training set
+# Reference colors derived from Canva design printed on photo paper:
+#   yellow  #ffde59  navy  #1800ad  blue(cyan)  #38b6ff
+#   red     #ff3131  pink  #ff66c4  green       #00bf36
 REFERENCE_PALETTE_DF = pd.DataFrame({
     "roi_name": ["yellow_patch", "navy_patch", "blue_patch", "red_patch", "pink_patch", "green_patch"],
-    "r_ref": [245.0, 35.0, 65.0, 215.0, 200.0, 80.0],      # Example; replace with actual training values
-    "g_ref": [202.0, 50.0, 130.0, 80.0, 150.0, 165.0],
-    "b_ref": [40.0, 110.0, 200.0, 70.0, 180.0, 70.0],
+    "r_ref": [255.0,  24.0,  56.0, 255.0, 255.0,   0.0],
+    "g_ref": [222.0,   0.0, 182.0,  49.0, 102.0, 191.0],
+    "b_ref": [ 89.0, 173.0, 255.0,  49.0, 196.0,  54.0],
 })
 
 # ===== QUALITY ASSESSMENT THRESHOLDS =====

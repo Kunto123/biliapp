@@ -548,7 +548,7 @@ const App = {
             🔄 Sambung Ulang Kamera
           </button>
           <div class="info-panel" style="margin-top:10px">
-            Setting disimpan di data/camera_settings.json dan akan dipakai kembali saat aplikasi dibuka.
+            Setting hanya tersimpan sementara di memori dan akan hilang saat server di-restart. Untuk perubahan permanen, edit config.py lalu restart server.
           </div>`;
       } catch {
         content.innerHTML = `<div style="padding:20px; color:var(--err)">Gagal memuat info kamera.</div>`;
@@ -740,6 +740,13 @@ function renderCaptureResult(result) {
   const inference = `${result.model_backend ?? '?'} / ${result.model_used ?? '?'}`;
   const latency = result.inference_time_ms != null ? `${Number(result.inference_time_ms).toFixed(1)} ms` : '-';
 
+  const rawAlignedBanner = mode === 'raw_aligned'
+    ? `<div class="result-mode-warn">Peringatan: palette tidak terdeteksi — mode raw_aligned, akurasi prediksi lebih rendah</div>`
+    : '';
+  const logWarnBanner = result.log_warning
+    ? `<div class="result-mode-warn">Peringatan: ${esc(result.log_warning)}</div>`
+    : '';
+
   content.innerHTML = `
     <div class="result-card ${sevClass}">
       <div class="result-num">${bili.toFixed(2)}</div>
@@ -747,6 +754,8 @@ function renderCaptureResult(result) {
       <hr class="result-hr" style="background:currentColor">
       <div class="result-level">${level}</div>
     </div>
+    ${rawAlignedBanner}
+    ${logWarnBanner}
     <div class="card">
       ${infoRow('Waktu',    ts)}
       ${infoRow('Kualitas', qual)}

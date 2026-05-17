@@ -14,7 +14,7 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from data_artifacts import ROI_CONFIG, REFERENCE_PALETTE_DF
+from data_artifacts import ROI_CONFIG, REFERENCE_PALETTE_DF, GRAY_PATCHES_REFERENCE_DF
 from preprocessing import BilirubinPreprocessor
 
 # Suppress TensorFlow warnings when the Keras fallback is used.
@@ -67,6 +67,7 @@ class BilirubinPredictor:
         self.preprocessor = BilirubinPreprocessor(
             roi_config=ROI_CONFIG,
             reference_palette_df=REFERENCE_PALETTE_DF,
+            gray_reference_df=GRAY_PATCHES_REFERENCE_DF,
         )
 
         self._load_models()
@@ -211,8 +212,13 @@ class BilirubinPredictor:
         input_dtype = input_info["dtype"]
         if input_dtype != np.float32:
             scale, zero_point = input_info.get("quantization", (0.0, 0))
-            if scale and scale > 0:
-                model_input = np.round(input_batch / scale + zero_point)
+            if not scale or scale <= 0:
+                raise ValueError(
+                    f"Model TFLite bertipe {input_dtype} tapi parameter quantization tidak valid "
+                    f"(scale={scale}, zero_point={zero_point}). "
+                    "Pastikan model di-export dengan quantization parameter yang benar."
+                )
+            model_input = np.round(input_batch / scale + zero_point)
             model_input = np.clip(model_input, np.iinfo(input_dtype).min, np.iinfo(input_dtype).max)
             model_input = model_input.astype(input_dtype)
         else:
@@ -281,16 +287,29 @@ class BilirubinPredictor:
             input_batch = self._preprocess_model_input(input_batch)
 
             started = time.perf_counter()
+            INFERENCE_TIMEOUT = 30.0  # detik
             if self.use_stage2 and self.model_stage2 is not None:
                 pred_stage1 = self._run_model(self.model_stage1, input_batch)
+                if time.perf_counter() - started > INFERENCE_TIMEOUT:
+                    raise TimeoutError(f"Inference stage 1 melebihi {INFERENCE_TIMEOUT}s")
                 pred_stage2 = self._run_model(self.model_stage2, input_batch)
+                if time.perf_counter() - started > INFERENCE_TIMEOUT:
+                    raise TimeoutError(f"Inference stage 2 melebihi {INFERENCE_TIMEOUT}s")
                 bilirubin_prediction = (pred_stage1 + pred_stage2) / 2.0
                 model_used = "stage1_stage2_average"
             else:
                 bilirubin_prediction = self._run_model(self.model_stage1, input_batch)
+                if time.perf_counter() - started > INFERENCE_TIMEOUT:
+                    raise TimeoutError(f"Inference melebihi {INFERENCE_TIMEOUT}s")
                 model_used = "stage1_only"
 
             self.last_inference_time_ms = round((time.perf_counter() - started) * 1000.0, 2)
+
+            if not (0.0 <= bilirubin_prediction <= 30.0):
+                raise ValueError(
+                    f"Prediksi di luar rentang valid: {bilirubin_prediction:.2f} mg/dL. "
+                    "Periksa kalibrasi model atau kualitas gambar input."
+                )
 
             result = {
                 "success": True,

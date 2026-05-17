@@ -5,6 +5,7 @@ Manage captured image files on disk.
 Handles saving, organizing, and file operations for captured images.
 """
 
+import shutil
 import cv2
 import numpy as np
 from pathlib import Path
@@ -51,7 +52,11 @@ class ImageStorage:
                 timestamp = datetime.now()
 
             today_dir = self.get_today_dir()
-            
+
+            free_bytes = shutil.disk_usage(str(today_dir)).free
+            if free_bytes < 10 * 1024 * 1024:
+                return False, "Disk hampir penuh — ruang kosong < 10 MB"
+
             # Create filename: prefix_HHMMSS_microseconds.jpg
             time_str = timestamp.strftime("%H%M%S")
             micros = timestamp.microsecond // 1000  # ms

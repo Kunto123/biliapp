@@ -20,7 +20,7 @@ from data_artifacts import (
     WARP_SIZE, TARGET_CHECKERBOARD_SIDE,
     ROI_CONFIG, GRAY_PATCHES, COLOR_PATCHES, SKIN_PATCHES,
     SHRINK_RATIOS,
-    TARGET_GRAY_LEVEL, REFERENCE_PALETTE_DF,
+    GRAY_PATCHES_REFERENCE_DF, REFERENCE_PALETTE_DF,
     EXPOSURE_V_RANGE, GRAY_SPREAD_MAX,
     WB_GRAY_IMPROVEMENT_MIN, FINAL_COLOR_IMPROVEMENT_MIN, FINAL_GRAY_DEGRADATION_TOL,
     PALETTE_CORRECTION_STRENGTH, PALETTE_DIAG_CLIP, PALETTE_OFFDIAG_CLIP, PALETTE_BIAS_CLIP,
@@ -270,12 +270,16 @@ def fit_gray_white_balance(
     image_rgb: np.ndarray,
     roi_config: Dict,
     gray_patch_names: List[str],
-    target_gray_level: float,
+    gray_reference_df: pd.DataFrame,
     gain_clip: Tuple[float, float] = WHITE_BALANCE_GAIN_CLIP
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """
-    Compute white balance gains from gray patches.
-    
+    Compute per-channel white balance gains from gray patches.
+
+    Each observed gray patch is compared to its reference RGB value.
+    Per-patch per-channel gains are computed; the median across patches is taken
+    for robustness against individual patch extraction errors.
+
     Returns:
         (gains: 3-element array [r, g, b], gray_obs_df: observed gray values)
     """
@@ -284,16 +288,30 @@ def fit_gray_white_balance(
     if len(gray_obs_df) < 2:
         raise ValueError("Less than 2 valid gray patches for white balance.")
 
-    # Use median of gray patches for robustness
-    r_obs = float(gray_obs_df["r"].median())
-    g_obs = float(gray_obs_df["g"].median())
-    b_obs = float(gray_obs_df["b"].median())
+    merged = gray_obs_df.merge(gray_reference_df, on="roi_name", how="inner")
 
-    gains = np.array([
-        target_gray_level / max(r_obs, 1e-6),
-        target_gray_level / max(g_obs, 1e-6),
-        target_gray_level / max(b_obs, 1e-6),
-    ], dtype=np.float32)
+    if len(merged) >= 2:
+        r_obs = merged["r"].to_numpy(dtype=np.float32)
+        g_obs = merged["g"].to_numpy(dtype=np.float32)
+        b_obs = merged["b"].to_numpy(dtype=np.float32)
+        r_ref = merged["r_ref"].to_numpy(dtype=np.float32)
+        g_ref = merged["g_ref"].to_numpy(dtype=np.float32)
+        b_ref = merged["b_ref"].to_numpy(dtype=np.float32)
+        gains = np.array([
+            float(np.median(r_ref / np.maximum(r_obs, 1e-6))),
+            float(np.median(g_ref / np.maximum(g_obs, 1e-6))),
+            float(np.median(b_ref / np.maximum(b_obs, 1e-6))),
+        ], dtype=np.float32)
+    else:
+        # Fallback: scalar target from reference median
+        r_ref = float(gray_reference_df["r_ref"].median())
+        g_ref = float(gray_reference_df["g_ref"].median())
+        b_ref = float(gray_reference_df["b_ref"].median())
+        gains = np.array([
+            r_ref / max(float(gray_obs_df["r"].median()), 1e-6),
+            g_ref / max(float(gray_obs_df["g"].median()), 1e-6),
+            b_ref / max(float(gray_obs_df["b"].median()), 1e-6),
+        ], dtype=np.float32)
 
     gains = np.clip(gains, gain_clip[0], gain_clip[1])
     return gains, gray_obs_df
@@ -488,9 +506,15 @@ class BilirubinPreprocessor:
     Handles: card detection, alignment, white balance, palette correction, quality assessment.
     """
 
-    def __init__(self, roi_config: Dict = None, reference_palette_df: pd.DataFrame = None):
+    def __init__(
+        self,
+        roi_config: Dict = None,
+        reference_palette_df: pd.DataFrame = None,
+        gray_reference_df: pd.DataFrame = None,
+    ):
         self.roi_config = ROI_CONFIG if roi_config is None else roi_config
         self.reference_palette_df = REFERENCE_PALETTE_DF if reference_palette_df is None else reference_palette_df
+        self.gray_reference_df = GRAY_PATCHES_REFERENCE_DF if gray_reference_df is None else gray_reference_df
         self.last_error = None
 
     def preprocess_image(
@@ -507,13 +531,16 @@ class BilirubinPreprocessor:
         try:
             def gate_failure(mode: str, message: str, diagnostics: Dict) -> Tuple[None, str, Dict]:
                 self.last_error = message
+                # Preserve palette_detected from quality_flags if already computed;
+                # don't unconditionally overwrite to False when something else failed.
+                palette_val = diagnostics.get("quality_flags", {}).get("palette_detected", False)
                 diagnostics.update({
                     "error": message,
                     "selected_mode": mode,
                     "quality_label": "failed",
                     "quality_score": 0,
                     "gatecheck_passed": False,
-                    "palette_detected": False,
+                    "palette_detected": palette_val,
                 })
                 return None, mode, diagnostics if return_diagnostics else {"error": message}
 
@@ -544,6 +571,13 @@ class BilirubinPreprocessor:
             checkerboard_score_max = max(side_scores.values()) if side_scores else 0.0
             if checkerboard_score_max < GATECHECK_MIN_CHECKERBOARD_SCORE:
                 gatecheck_errors.append("Checkerboard pada kartu kalibrasi tidak cukup jelas.")
+            else:
+                sorted_scores = sorted(side_scores.values(), reverse=True)
+                if len(sorted_scores) >= 2 and sorted_scores[1] > 0:
+                    if sorted_scores[0] / sorted_scores[1] < 1.5:
+                        gatecheck_warnings.append(
+                            "Orientasi kartu tidak pasti — posisikan checkerboard agar lebih terlihat jelas di salah satu sisi."
+                        )
 
             blur_score = blur_score_laplacian(raw_rgb)
             if blur_score < GATECHECK_MIN_BLUR_SCORE:
@@ -612,10 +646,12 @@ class BilirubinPreprocessor:
             gray_level_spread_raw = gray_level_spread_score(gray_raw)
 
             # White balance only
-            wb_gains, gray_wb = fit_gray_white_balance(
-                raw_rgb, self.roi_config, GRAY_PATCHES, TARGET_GRAY_LEVEL
+            wb_gains, _gray_obs = fit_gray_white_balance(
+                raw_rgb, self.roi_config, GRAY_PATCHES, self.gray_reference_df
             )
             wb_rgb = apply_channel_gains(raw_rgb, wb_gains)
+            # Measure neutrality on the WB-corrected image (not pre-WB observations)
+            gray_wb = extract_gray_patch_summary(wb_rgb, self.roi_config, GRAY_PATCHES)
             gray_std_wb = gray_neutrality_score(gray_wb)
 
             err_wb = evaluate_patch_error(

@@ -266,14 +266,15 @@ async def startup():
     global pipeline
     m1 = BASE_DIR / "best_model_stage1.keras"
     m2 = BASE_DIR / "best_model_stage2.keras"
+    stage2_available = m2.exists() or MODEL_STAGE2_TFLITE_PATH.exists()
     print(f"[api] BASE_DIR : {BASE_DIR}")
     print(f"[api] Stage1   : {m1} (exists={m1.exists()})")
-    print(f"[api] Stage2   : {m2} (exists={m2.exists()})")
+    print(f"[api] Stage2   : {m2} (keras={m2.exists()}, tflite={MODEL_STAGE2_TFLITE_PATH.exists()})")
     try:
         pipeline = BilirubinPredictionPipeline(
             model_stage1_path=str(m1),
             model_stage2_path=str(m2) if m2.exists() else None,
-            use_stage2=USE_STAGE2 and m2.exists(),
+            use_stage2=USE_STAGE2 and stage2_available,
             logs_dir=str(BASE_DIR / "logs"),
             images_dir=str(BASE_DIR / "data" / "captures"),
             model_backend=MODEL_BACKEND,
@@ -546,38 +547,43 @@ async def _execute_capture() -> dict:
     """Core capture+predict logic. Flash dikontrol langsung oleh switch di gpio_manager."""
     global capture_in_progress
 
-    with camera_lock:
-        restart_preview = preview_stream is not None and preview_stream.is_running
-        _stop_preview_stream()
-        capture_in_progress = True
-        gpio_manager.mark_captured()   # blokir re-capture sampai switch dilepas
-        try:
-            prediction, result = pipeline.capture_and_predict()
-            if result.get("timestamp"):
-                result["timestamp"] = result["timestamp"].isoformat()
+    if capture_in_progress:
+        return {"success": False, "error": "Capture sedang berlangsung", "busy": True}
+    capture_in_progress = True
 
-            if result.get("image_path") and Path(result["image_path"]).exists():
-                img = cv2.imread(result["image_path"])
-                if img is not None:
-                    _update_preview_cache(img)
-                    _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    result["image_b64"] = base64.b64encode(buf).decode()
+    try:
+        with camera_lock:
+            restart_preview = preview_stream is not None and preview_stream.is_running
+            _stop_preview_stream()
+            gpio_manager.mark_captured()   # blokir re-capture sampai switch dilepas
+            try:
+                prediction, result = pipeline.capture_and_predict()
+                if result.get("timestamp"):
+                    result["timestamp"] = result["timestamp"].isoformat()
 
-            if not result.get("success"):
-                error_text = str(result.get("error") or "").lower()
-                camera_failed = (
-                    error_text.startswith("camera")
-                    or "capture failed" in error_text
-                    or "rpicam" in error_text
-                    or "libcamera" in error_text
-                )
-                result["camera_recovered"] = _reset_camera_if_needed(force=camera_failed)
+                if result.get("image_path") and Path(result["image_path"]).exists():
+                    img = cv2.imread(result["image_path"])
+                    if img is not None:
+                        _update_preview_cache(img)
+                        _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        result["image_b64"] = base64.b64encode(buf).decode()
 
-            return result
-        finally:
-            capture_in_progress = False
-            if restart_preview and _camera_is_available():
-                _ensure_preview_stream()
+                if not result.get("success"):
+                    error_text = str(result.get("error") or "").lower()
+                    camera_failed = (
+                        error_text.startswith("camera")
+                        or "capture failed" in error_text
+                        or "rpicam" in error_text
+                        or "libcamera" in error_text
+                    )
+                    result["camera_recovered"] = _reset_camera_if_needed(force=camera_failed)
+
+                return result
+            finally:
+                if restart_preview and _camera_is_available():
+                    _ensure_preview_stream()
+    finally:
+        capture_in_progress = False
 
 
 @app.post("/api/capture")
