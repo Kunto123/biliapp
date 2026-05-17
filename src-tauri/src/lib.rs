@@ -215,6 +215,14 @@ pub fn run() {
                 let _ = window.set_resizable(true);
                 let _ = window.maximize();
                 let _ = window.set_fullscreen(true);
+                // Wayland memproses window state secara async — compositor bisa
+                // mengabaikan request fullscreen yang datang sebelum surface siap.
+                // Retry setelah 1 detik memastikan fullscreen selalu aktif.
+                let w = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    let _ = w.set_fullscreen(true);
+                });
             }
             Ok(())
         })

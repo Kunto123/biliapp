@@ -1,25 +1,13 @@
 [Unit]
-Description=BiliApp - Bilirubin Detection Server
-After=network.target
+Description=BiliApp GPIO Setup — nonaktifkan SPI untuk akses BCM 7 & 8
+DefaultDependencies=no
+After=sysinit.target
+Before=graphical.target
 
 [Service]
-Type=simple
-User=bilirubin
-WorkingDirectory=/home/bilirubin/BiliApp/biliapp/src-python
-
-# Nonaktifkan SPI sebelum start (+ = jalankan sebagai root)
-ExecStartPre=+/sbin/modprobe -r spidev
-ExecStartPre=+/sbin/modprobe -r spi_bcm2835
-
-# Jalankan server pakai Python dari venv
-ExecStart=/home/bilirubin/BiliApp/biliapp/.venv-lin/bin/python api_server.py
-
-# Restart otomatis kalau crash
-Restart=on-failure
-RestartSec=5
-
-StandardOutput=journal
-StandardError=journal
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/sbin/modprobe -r spidev 2>/dev/null; /sbin/modprobe -r spi_bcm2835 2>/dev/null; exit 0'
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target
