@@ -1,5 +1,5 @@
-# Logs
-logs
+# Logs and runtime output
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -7,20 +7,51 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# App runtime data
+data/captures/
+data/camera_settings.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv-bilirubin/
+.venv*/
+venv/
+ENV/
+
+# Node/Vite
+node_modules/
+dist/
+dist-ssr/
 *.local
+
+# Rust/Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Android/Gradle generated output
+.gradle/
+build/
+.externalNativeBuild/
+.cxx/
+local.properties
+key.properties
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-.venv-bilirubin
-.venv*
