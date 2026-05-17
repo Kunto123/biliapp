@@ -536,8 +536,10 @@ class CameraManager:
         cmd = [
             self._rpicam_cmd,
             "-n",
-            "--timeout", "2000",           # 2s AE/AWB/AF warmup
+            "--timeout", "1500",           # 1.5s AE/AWB/AF warmup
             "--autofocus-mode", "auto",    # trigger AF before capture (ArduCam 64MP)
+            "--shutter", "8000",           # 8ms = 1/125s — freeze hand movement
+            "--gain", "8",                 # boost analogue gain to compensate shorter exposure
             "--width",
             str(width),
             "--height",
