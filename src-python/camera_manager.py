@@ -536,7 +536,8 @@ class CameraManager:
         cmd = [
             self._rpicam_cmd,
             "-n",
-            "--timeout", "1000",  # 1s AE/AWB warmup — --immediate caused underexposed/blurry frames
+            "--timeout", "2000",           # 2s AE/AWB/AF warmup
+            "--autofocus-mode", "auto",    # trigger AF before capture (ArduCam 64MP)
             "--width",
             str(width),
             "--height",
