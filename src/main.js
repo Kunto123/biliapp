@@ -492,14 +492,23 @@ const App = {
       const content = document.getElementById('camera-config-content');
       content.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-sub)">Memuat…</div>`;
       try {
-        const [configResp, devicesResp, statusResp] = await Promise.all([
+        const [configResult, devicesResult, statusResult] = await Promise.allSettled([
           apiGet('/api/camera/config'),
           apiGet('/api/camera/devices'),
           apiGet('/api/status'),
         ]);
+        if (configResult.status !== 'fulfilled') {
+          throw configResult.reason;
+        }
+        const configResp = configResult.value;
+        const devicesResp = devicesResult.status === 'fulfilled' ? devicesResult.value : { devices: [], error: devicesResult.reason?.message };
+        const statusResp = statusResult.status === 'fulfilled' ? statusResult.value : { camera: {} };
         const settings = configResp.settings ?? {};
         const devices = devicesResp.devices ?? [];
         const cam = statusResp.camera ?? {};
+        const scanWarning = devicesResp.success === false || devicesResult.status !== 'fulfilled'
+          ? `<div class="info-panel" style="margin-top:10px">Scan kamera tidak lengkap: ${esc(devicesResp.error || 'kamera sedang dipakai')}</div>`
+          : '';
         const previewValue = resolutionValue(settings.preview_resolution);
         const captureValue = resolutionValue(settings.capture_resolution);
         const fpsValue = settings.fps ?? 0;
@@ -554,9 +563,10 @@ const App = {
           </button>
           <div class="info-panel" style="margin-top:10px">
             Setting hanya tersimpan sementara di memori dan akan hilang saat server di-restart. Untuk perubahan permanen, edit config.py lalu restart server.
-          </div>`;
-      } catch {
-        content.innerHTML = `<div style="padding:20px; color:var(--err)">Gagal memuat info kamera.</div>`;
+          </div>
+          ${scanWarning}`;
+      } catch (err) {
+        content.innerHTML = `<div style="padding:20px; color:var(--err)">Gagal memuat info kamera: ${esc(err?.message || err || 'error tidak diketahui')}</div>`;
       }
     });
   },

@@ -7,7 +7,14 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src-python"))
 
-from camera_manager import CameraPreviewStream, CameraType, extract_jpeg_frames
+import camera_manager
+from camera_manager import (
+    CameraPreviewStream,
+    CameraType,
+    _opencv_backend_id,
+    _open_video_capture,
+    extract_jpeg_frames,
+)
 
 
 class CameraPreviewStreamTests(unittest.TestCase):
@@ -67,6 +74,18 @@ class CameraPreviewStreamTests(unittest.TestCase):
         self.assertEqual(second_jpeg, b"\xff\xd8two\xff\xd9")
         self.assertGreaterEqual(second_at, first_at)
         self.assertEqual(stream.status()["frame_id"], 2)
+
+    def test_windows_opencv_backend_defaults_to_directshow(self):
+        with mock.patch.dict("camera_manager.os.environ", {}, clear=True):
+            with mock.patch("camera_manager.os.name", "nt"):
+                self.assertEqual(_opencv_backend_id(), camera_manager.cv2.CAP_DSHOW)
+
+    def test_open_video_capture_uses_selected_backend(self):
+        with mock.patch("camera_manager._opencv_backend_id", return_value=700):
+            with mock.patch("camera_manager.cv2.VideoCapture") as video_capture:
+                _open_video_capture(2)
+
+        video_capture.assert_called_once_with(2, 700)
 
 
 if __name__ == "__main__":

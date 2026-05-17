@@ -405,9 +405,34 @@ async def update_camera_config(payload: CameraSettingsPayload):
 
 @app.get("/api/camera/devices")
 async def get_camera_devices(max_index: int = 5):
+    global preview_stream
     max_index = max(0, min(int(max_index), 10))
-    devices = scan_opencv_devices(max_index=max_index)
-    return {"success": True, "devices": devices, "max_index": max_index}
+    if not camera_lock.acquire(blocking=False):
+        camera = getattr(pipeline, "camera", None)
+        current_index = getattr(camera, "camera_index", _active_camera_settings()["camera_index"])
+        return {
+            "success": False,
+            "devices": [{"index": current_index, "name": f"Camera {current_index}", "available": True}],
+            "max_index": max_index,
+            "error": "Kamera sedang dipakai",
+        }
+
+    try:
+        _stop_preview_stream()
+        preview_stream = None
+        devices = scan_opencv_devices(max_index=max_index)
+        return {"success": True, "devices": devices, "max_index": max_index, "error": None}
+    except Exception as exc:
+        camera = getattr(pipeline, "camera", None)
+        current_index = getattr(camera, "camera_index", _active_camera_settings()["camera_index"])
+        return {
+            "success": False,
+            "devices": [{"index": current_index, "name": f"Camera {current_index}", "available": True}],
+            "max_index": max_index,
+            "error": str(exc),
+        }
+    finally:
+        camera_lock.release()
 
 
 @app.get("/api/camera/frame")
@@ -551,7 +576,7 @@ async def reconnect_camera():
 
 async def _execute_capture() -> dict:
     """Core capture+predict logic. Flash dikontrol langsung oleh switch di gpio_manager."""
-    global capture_in_progress
+    global capture_in_progress, preview_stream
 
     if capture_in_progress:
         return {"success": False, "error": "Capture sedang berlangsung", "busy": True}
@@ -561,6 +586,7 @@ async def _execute_capture() -> dict:
         with camera_lock:
             restart_preview = preview_stream is not None and preview_stream.is_running
             _stop_preview_stream()
+            preview_stream = None
             gpio_manager.mark_captured()   # blokir re-capture sampai switch dilepas
             gpio_manager.set_flash(True)   # nyalakan flash agar AE warmup terang
             try:

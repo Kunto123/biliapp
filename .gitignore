@@ -11,6 +11,11 @@ lerna-debug.log*
 data/captures/
 data/camera_settings.json
 
+# Local environment
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]

@@ -5,6 +5,74 @@ from pathlib import Path
 import os
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DOTENV_PATH = PROJECT_ROOT / ".env"
+
+
+def _strip_inline_comment(value: str) -> str:
+    quote = None
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value.rstrip()
+
+
+def _normalize_env_value(value: str) -> str:
+    value = _strip_inline_comment(value.strip())
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        quote = value[0]
+        value = value[1:-1]
+        if quote == '"':
+            value = value.replace(r"\\", "\\").replace(r"\"", '"')
+    return value
+
+
+def _is_valid_env_key(key: str) -> bool:
+    return bool(key) and (key[0].isalpha() or key[0] == "_") and all(
+        char.isalnum() or char == "_" for char in key
+    )
+
+
+def _load_dotenv(path: Path = DOTENV_PATH) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not _is_valid_env_key(key):
+            continue
+        os.environ.setdefault(key, _normalize_env_value(value))
+
+    return True
+
+
+_DOTENV_LOADED = _load_dotenv()
+
+
 def _is_raspberry_pi_hardware() -> bool:
     """Detect Raspberry Pi via /proc/device-tree/model or /proc/cpuinfo (no env var needed)."""
     try:
@@ -67,7 +135,6 @@ def _env_rotation(name: str, default: int) -> int:
     return value if value in {0, 90, 180, 270} else default
 
 # ===== PATHS =====
-PROJECT_ROOT = Path(__file__).parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
 IMAGES_DIR = PROJECT_ROOT / "data" / "captures"
 MODELS_DIR = PROJECT_ROOT
@@ -155,6 +222,7 @@ ENABLE_INFERENCE_TIME_LOGGING = True  # Log inference latency
 BATCH_SIZE = 1  # For inference
 
 print("[Config] Configuration loaded from:", __file__)
+print("[Config] .env:", DOTENV_PATH if _DOTENV_LOADED else "not found")
 print(
     "[Config] device=%s backend=%s camera=%s resolution=%sx%s rotation=%s"
     % (

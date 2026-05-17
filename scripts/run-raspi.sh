@@ -55,6 +55,53 @@ if [ "$AUTOSTART" -eq 1 ]; then
   echo "[bili-app] Autostart run at $(date -Is)"
 fi
 
+load_dotenv_defaults() {
+  local dotenv="$APP_ROOT/.env"
+  local raw_line line key value
+
+  [ -f "$dotenv" ] || return 0
+
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    [[ "$line" == \#* ]] && continue
+
+    if [[ "$line" == export\ * ]]; then
+      line="${line#export }"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    [[ "$line" == *=* ]] || continue
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [ -z "${!key+x}" ] || continue
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ "$value" != \"* && "$value" != \'* ]]; then
+      value="${value%%[[:space:]]#*}"
+      value="${value%"${value##*[![:space:]]}"}"
+    fi
+    if [ "${#value}" -ge 2 ]; then
+      if [[ "${value:0:1}" == "\"" && "${value: -1}" == "\"" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+
+    export "$key=$value"
+  done < "$dotenv"
+
+  echo "[bili-app] Loaded .env defaults: $dotenv"
+}
+
+load_dotenv_defaults
+
 export BILIRUBIN_DEVICE="${BILIRUBIN_DEVICE:-raspi5}"
 export BILIRUBIN_CAMERA_TYPE="${BILIRUBIN_CAMERA_TYPE:-libcamera}"
 export BILIRUBIN_MODEL_BACKEND="${BILIRUBIN_MODEL_BACKEND:-tflite}"

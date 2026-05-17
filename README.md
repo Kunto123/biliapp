@@ -65,31 +65,40 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
 
    Copy the generated `models/best_model_stage1.tflite` and `models/best_model_stage2.tflite` to the Raspberry Pi.
 
-5. Run the production app with Pi defaults:
+5. Create local environment configuration:
+   ```bash
+   cp .env.example .env
+   ```
+   Edit `.env` for the current machine. For Raspberry Pi 5, use:
+   ```dotenv
+   BILIRUBIN_DEVICE=raspi5
+   BILIRUBIN_CAMERA_TYPE=libcamera
+   BILIRUBIN_MODEL_BACKEND=tflite
+   BILIRUBIN_USE_STAGE2=false
+   BILIRUBIN_PREVIEW_FPS=30
+   BILIRUBIN_PREVIEW_MIN_FPS=30
+   ```
+   Keep `BILIRUBIN_CAPTURE_IMMEDIATE=false` for palette work; immediate capture
+   skips camera settling and can make focus/AWB less reliable. `.env` is local
+   and ignored by git; commit changes to `.env.example` when defaults need to be
+   shared.
+
+6. Run the production app with Pi defaults:
    ```bash
    chmod +x scripts/run-raspi.sh scripts/install-raspi-autostart.sh
    ./scripts/run-raspi.sh
    ```
    The script builds once when `src-tauri/target/release/bili-app` is missing,
-   then starts the production binary. It sets Raspberry Pi defaults for
-   libcamera, TFLite, stage 1 only, and 30 FPS MJPEG preview. Camera rotation
-   defaults to `CAMERA_ROTATION` in `src-python/config.py`.
+   then starts the production binary. It loads `.env` first, then applies
+   Raspberry Pi defaults for values that are still unset.
 
    To override camera rotation for one run:
    ```bash
    BILIRUBIN_CAMERA_ROTATION=90 ./scripts/run-raspi.sh
    ```
 
-   To change the default in code, edit `CAMERA_ROTATION` in
-   `src-python/config.py`. Valid values are `0`, `90`, `180`, and `270`.
-
-6. Smoke test:
+7. Smoke test:
    ```bash
-   export BILIRUBIN_DEVICE=raspi5
-   export BILIRUBIN_CAMERA_TYPE=libcamera
-   export BILIRUBIN_MODEL_BACKEND=tflite
-   export BILIRUBIN_USE_STAGE2=0
-   export BILIRUBIN_CAMERA_ROTATION=180
    python src-python/api_server.py
    ```
    In another terminal:
@@ -106,7 +115,7 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
    python scripts/qa_image_pipeline.py --json
    ```
 
-7. Enable autostart after GUI login:
+8. Enable autostart after GUI login:
    ```bash
    ./scripts/install-raspi-autostart.sh
    ```
@@ -114,7 +123,7 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
    power-on, enable GUI auto-login in Raspberry Pi/Ubuntu settings. Autostart
    logs are written to `logs/autostart.log`.
 
-Useful Raspberry Pi environment overrides:
+Useful `.env` overrides:
 
 - `BILIRUBIN_CAMERA_RESOLUTION=1920x1080`
 - `BILIRUBIN_CAMERA_PREVIEW_RESOLUTION=640x480`
@@ -134,4 +143,3 @@ Useful Raspberry Pi environment overrides:
 
 Capture gatecheck rejects images before inference when the card, checkerboard, gray patches, color palette, exposure, blur, or skin ROI is not acceptable.
 Failed gatecheck captures are saved with a `rejected_` prefix and logged, so blur/palette failures can be audited after testing.
-Keep `BILIRUBIN_CAPTURE_IMMEDIATE=0` for palette work; immediate capture skips camera settling and can make focus/AWB less reliable.

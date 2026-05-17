@@ -7,9 +7,16 @@ Supports libcamera and fallback to OpenCV VideoCapture.
 
 from __future__ import annotations
 
+import os
+
+# Keep OpenCV from probing noisy/irrelevant backends before it opens a camera.
+# This is especially useful on Windows, where the OBSensor backend can emit
+# "Camera index out of range" repeatedly while scanning.
+os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_OBSENSOR", "0")
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
+
 import cv2
 import numpy as np
-import os
 from typing import Optional, Tuple
 from enum import Enum
 from collections import deque
@@ -36,6 +43,29 @@ JPEG_EOI = b"\xff\xd9"
 
 # Extra directories to search when rpicam tools are not in PATH (common on Pi via Tauri spawn)
 _EXTRA_BINARY_DIRS = ("/usr/bin", "/usr/local/bin", "/opt/libcamera/bin")
+
+
+def _opencv_backend_id() -> int:
+    """Return the preferred OpenCV VideoCapture backend for this platform."""
+    default_backend = "dshow" if os.name == "nt" else "default"
+    requested = os.getenv("BILIRUBIN_OPENCV_BACKEND", default_backend).strip().lower()
+    backend_map = {
+        "default": 0,
+        "any": 0,
+        "auto": 0,
+        "dshow": getattr(cv2, "CAP_DSHOW", 0),
+        "directshow": getattr(cv2, "CAP_DSHOW", 0),
+        "msmf": getattr(cv2, "CAP_MSMF", 0),
+        "v4l2": getattr(cv2, "CAP_V4L2", 0),
+    }
+    return int(backend_map.get(requested, backend_map[default_backend]))
+
+
+def _open_video_capture(camera_index: int):
+    backend = _opencv_backend_id()
+    if backend:
+        return cv2.VideoCapture(camera_index, backend)
+    return cv2.VideoCapture(camera_index)
 
 
 def _find_command(*names: str) -> Optional[str]:
@@ -85,7 +115,7 @@ def scan_opencv_devices(max_index: int = 5) -> list[dict]:
     """Return OpenCV camera indices that can be opened."""
     devices = []
     for index in range(max(0, int(max_index)) + 1):
-        cap = cv2.VideoCapture(index)
+        cap = _open_video_capture(index)
         try:
             if not cap.isOpened():
                 continue
@@ -106,6 +136,8 @@ def scan_opencv_devices(max_index: int = 5) -> list[dict]:
                 cap.release()
             except Exception:
                 pass
+            if os.name == "nt":
+                time.sleep(0.05)
     return devices
 
 
@@ -215,16 +247,21 @@ class CameraPreviewStream:
                 except Exception:
                     pass
 
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.8)
+
         cap = self._cap
         if cap is not None:
             try:
                 cap.release()
             except Exception:
                 pass
+            if os.name == "nt":
+                time.sleep(0.15)
 
-        thread = self._thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            thread.join(timeout=1.2)
 
         self._thread = None
         self._process = None
@@ -338,7 +375,7 @@ class CameraPreviewStream:
                 self._store_jpeg(frame)
 
     def _run_opencv(self) -> None:
-        cap = cv2.VideoCapture(self.camera_index)
+        cap = _open_video_capture(self.camera_index)
         self._cap = cap
         if not cap.isOpened():
             self._set_error(f"Failed to open preview camera at index {self.camera_index}")
@@ -358,34 +395,48 @@ class CameraPreviewStream:
             self._detected_fps = float(target_fps)
 
         frame_interval = 1.0 / target_fps
+        consecutive_failures = 0
 
-        while not self._stop_event.is_set():
-            t_start = time.monotonic()
+        try:
+            while not self._stop_event.is_set():
+                t_start = time.monotonic()
 
-            ok, frame = cap.read()
-            if not ok:
-                self._set_error("Failed to read preview frame")
+                ok, frame = cap.read()
+                if not ok:
+                    consecutive_failures += 1
+                    self._set_error("Failed to read preview frame")
+                    if consecutive_failures >= 10:
+                        break
+                    time.sleep(0.05)
+                    continue
+
+                consecutive_failures = 0
+                if frame.shape[1] != width or frame.shape[0] != height:
+                    frame = cv2.resize(frame, (width, height))
+                frame = self._apply_rotation_for_preview(frame)
+
+                ok, buf = cv2.imencode(
+                    ".jpg",
+                    frame,
+                    [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
+                )
+                if ok:
+                    self._store_jpeg(buf.tobytes())
+
+                # Sleep sisa waktu agar tidak tight-loop ketika cap.read() non-blocking.
+                elapsed = time.monotonic() - t_start
+                remaining = frame_interval - elapsed
+                if remaining > 0.001:
+                    time.sleep(remaining)
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+            if self._cap is cap:
+                self._cap = None
+            if os.name == "nt":
                 time.sleep(0.05)
-                continue
-
-            if frame.shape[1] != width or frame.shape[0] != height:
-                frame = cv2.resize(frame, (width, height))
-            frame = self._apply_rotation_for_preview(frame)
-
-            ok, buf = cv2.imencode(
-                ".jpg",
-                frame,
-                [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
-            )
-            if ok:
-                self._store_jpeg(buf.tobytes())
-
-            # Sleep sisa waktu agar tidak tight-loop ketika cap.read() non-blocking.
-            # Jika cap.read() sudah blocking alami (Pi CSI via V4L2), elapsed ≈ interval → sleep ≈ 0.
-            elapsed = time.monotonic() - t_start
-            remaining = frame_interval - elapsed
-            if remaining > 0.001:
-                time.sleep(remaining)
 
     def _apply_rotation_for_preview(self, frame: np.ndarray) -> np.ndarray:
         if self.rotation == 90:
@@ -497,7 +548,7 @@ class CameraManager:
         Instead we probe once here and release; _open_opencv_cap() opens fresh for capture.
         """
         try:
-            cap = cv2.VideoCapture(self.camera_index)
+            cap = _open_video_capture(self.camera_index)
             if not cap.isOpened():
                 self.error_message = f"Failed to open camera at index {self.camera_index}"
                 cap.release()
@@ -511,6 +562,8 @@ class CameraManager:
                     self._capture_fps = float(reported)
 
             cap.release()
+            if os.name == "nt":
+                time.sleep(0.15)
             self.cap = None  # Not held; preview stream owns the device during preview
             self.is_open = True
             return True
@@ -521,20 +574,28 @@ class CameraManager:
 
     def _open_opencv_cap(self) -> Optional[cv2.VideoCapture]:
         """Open a fresh VideoCapture configured for capture. Caller MUST release it."""
-        cap = cv2.VideoCapture(self.camera_index)
-        if not cap.isOpened():
-            self.error_message = f"Camera {self.camera_index} unavailable for capture"
-            cap.release()
-            return None
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-        cap.set(cv2.CAP_PROP_FPS, self._capture_fps)
-        if self.auto_exposure:
-            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-            cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
-        if -1.0 <= self.brightness <= 1.0:
-            cap.set(cv2.CAP_PROP_BRIGHTNESS, int((self.brightness + 1.0) * 127.5))
-        return cap
+        for attempt in range(3):
+            cap = _open_video_capture(self.camera_index)
+            if not cap.isOpened():
+                self.error_message = f"Camera {self.camera_index} unavailable for capture"
+                cap.release()
+                time.sleep(0.15)
+                continue
+
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+            cap.set(cv2.CAP_PROP_FPS, self._capture_fps)
+            if self.auto_exposure:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+            if -1.0 <= self.brightness <= 1.0:
+                cap.set(cv2.CAP_PROP_BRIGHTNESS, int((self.brightness + 1.0) * 127.5))
+            if os.name == "nt":
+                time.sleep(0.15)
+            return cap
+
+        self.error_message = f"Camera {self.camera_index} unavailable for capture after retries"
+        return None
 
     def _init_libcamera(self) -> bool:
         """Initialize via rpicam/libcamera CLI tools (for Raspberry Pi 5)."""
@@ -694,23 +755,30 @@ class CameraManager:
 
         # OpenCV: open a fresh cap so there's no dual-open conflict with the preview stream.
         # The preview stream owns VideoCapture during preview; we open only when capturing.
-        cap = self._open_opencv_cap()
-        if cap is None:
-            return None
-        try:
-            # Discard the first couple of frames from the internal pipeline
-            cap.grab()
-            cap.grab()
-            ret, frame = cap.read()
-            if not ret:
-                self.error_message = "Failed to capture frame"
-                return None
-            return self._apply_rotation(frame)
-        except Exception as e:
-            self.error_message = str(e)
-            return None
-        finally:
-            cap.release()
+        for attempt in range(3):
+            cap = self._open_opencv_cap()
+            if cap is None:
+                time.sleep(0.15)
+                continue
+            try:
+                # Discard stale frames from the internal pipeline after preview handoff.
+                for _ in range(4):
+                    cap.grab()
+                ret, frame = cap.read()
+                if not ret:
+                    self.error_message = "Failed to capture frame"
+                    time.sleep(0.15)
+                    continue
+                return self._apply_rotation(frame)
+            except Exception as e:
+                self.error_message = str(e)
+                time.sleep(0.15)
+            finally:
+                cap.release()
+                if os.name == "nt":
+                    time.sleep(0.15)
+
+        return None
 
     def capture_multiple(self, num_frames: int = 5, interval_ms: int = 100) -> list:
         """
@@ -871,9 +939,11 @@ def auto_detect_camera(rotation: int = 0) -> Optional[CameraManager]:
 
     # Fallback to OpenCV (works well for many USB cameras).
     try:
-        cap = cv2.VideoCapture(0)
+        cap = _open_video_capture(0)
         if cap.isOpened():
             cap.release()
+            if os.name == "nt":
+                time.sleep(0.15)
             return CameraManager(camera_type=CameraType.OPENCV, camera_index=0, rotation=rotation)
     except Exception:
         pass
