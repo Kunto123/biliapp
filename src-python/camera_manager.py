@@ -536,7 +536,7 @@ class CameraManager:
         cmd = [
             self._rpicam_cmd,
             "-n",
-            "--immediate",
+            "--timeout", "1000",  # 1s AE/AWB warmup — --immediate caused underexposed/blurry frames
             "--width",
             str(width),
             "--height",

@@ -128,6 +128,15 @@ class GPIOManager:
         with self._lock:
             self._capture_triggered = False
 
+    def set_flash(self, on: bool) -> None:
+        """Directly control flash for software-triggered capture."""
+        if not self._available or self._lgpio is None or self._h is None:
+            return
+        try:
+            self._lgpio.gpio_write(self._h, _PIN_FLASH, 1 if on else 0)
+        except Exception as exc:
+            logger.warning("[gpio] set_flash error: %s", exc)
+
     def get_status(self) -> dict:
         switch_state = None
         if self._available and self._lgpio and self._h is not None:

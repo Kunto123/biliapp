@@ -556,6 +556,7 @@ async def _execute_capture() -> dict:
             restart_preview = preview_stream is not None and preview_stream.is_running
             _stop_preview_stream()
             gpio_manager.mark_captured()   # blokir re-capture sampai switch dilepas
+            gpio_manager.set_flash(True)   # nyalakan flash agar AE warmup terang
             try:
                 prediction, result = pipeline.capture_and_predict()
                 if result.get("timestamp"):
@@ -580,6 +581,7 @@ async def _execute_capture() -> dict:
 
                 return result
             finally:
+                gpio_manager.set_flash(False)  # matikan flash setelah capture selesai
                 if restart_preview and _camera_is_available():
                     _ensure_preview_stream()
     finally:
