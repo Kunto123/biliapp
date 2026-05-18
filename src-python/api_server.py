@@ -46,6 +46,7 @@ from config import (
     CAMERA_CAPTURE_TIMEOUT_MS,
     GATECHECK_MIN_BLUR_SCORE,
     MODEL_BACKEND,
+    MODEL_MODE,
     MODEL_STAGE1_TFLITE_PATH,
     MODEL_STAGE2_TFLITE_PATH,
     PREVIEW_POLL_MS,
@@ -278,6 +279,7 @@ async def startup():
             model_stage1_path=str(m1),
             model_stage2_path=str(m2) if m2.exists() else None,
             use_stage2=USE_STAGE2 and stage2_available,
+            model_mode=MODEL_MODE,
             logs_dir=str(BASE_DIR / "logs"),
             images_dir=str(BASE_DIR / "data" / "captures"),
             model_backend=MODEL_BACKEND,
@@ -331,7 +333,9 @@ async def get_status():
         "capture_retries": CAMERA_CAPTURE_RETRIES,
         "capture_immediate": CAMERA_CAPTURE_IMMEDIATE,
         "camera_settings_source": settings_source,
-        "use_stage2": USE_STAGE2,
+        "configured_model_mode": MODEL_MODE,
+        "model_mode": status.get("models", {}).get("model_mode", MODEL_MODE),
+        "use_stage2": status.get("models", {}).get("using_stage2", USE_STAGE2),
     }
     # Pastikan serializable
     for k, v in list(status.items()):
@@ -674,7 +678,8 @@ async def get_stats():
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 class ModelSettings(BaseModel):
-    use_stage2: bool
+    model_mode: Optional[str] = None
+    use_stage2: Optional[bool] = None
 
 
 @app.post("/api/settings/model")
@@ -682,8 +687,17 @@ async def update_model(settings: ModelSettings):
     if pipeline is None:
         return {"success": False, "error": "Pipeline tidak diinisialisasi"}
     try:
-        pipeline.prediction_engine.use_stage2 = settings.use_stage2
-        return {"success": True, "use_stage2": settings.use_stage2}
+        model_mode = settings.model_mode
+        if model_mode is None and settings.use_stage2 is not None:
+            model_mode = "stage2" if settings.use_stage2 else "stage1"
+        if model_mode is None:
+            return {"success": False, "error": "model_mode wajib diisi"}
+
+        ok, error = pipeline.prediction_engine.set_model_mode(model_mode)
+        info = pipeline.prediction_engine.get_model_info()
+        if not ok:
+            return {"success": False, "error": error, "models": info}
+        return {"success": True, "model_mode": info["model_mode"], "use_stage2": info["using_stage2"], "models": info}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

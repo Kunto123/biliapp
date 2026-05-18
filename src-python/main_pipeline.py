@@ -27,6 +27,7 @@ from config import (
     CAMERA_TIMEOUT_SECONDS,
     MODEL_BACKEND,
     MODEL_INPUT_SIZE,
+    MODEL_MODE,
     MODEL_STAGE1_TFLITE_PATH,
     MODEL_STAGE2_TFLITE_PATH,
 )
@@ -43,6 +44,7 @@ class BilirubinPredictionPipeline:
         model_stage1_path: str,
         model_stage2_path: Optional[str] = None,
         use_stage2: bool = True,
+        model_mode: Optional[str] = MODEL_MODE,
         logs_dir: str = "logs",
         images_dir: str = "data/captures",
         camera: Optional[CameraManager] = None,
@@ -56,7 +58,8 @@ class BilirubinPredictionPipeline:
         Args:
             model_stage1_path: Path to stage1 model
             model_stage2_path: Path to stage2 model (optional)
-            use_stage2: Use stage2 if available
+            use_stage2: Legacy boolean fallback for model_mode
+            model_mode: stage1, stage2, or stage1_stage2_average
             logs_dir: Directory for logs
             images_dir: Directory for captured images
             camera: CameraManager instance (auto-detect if None)
@@ -71,6 +74,7 @@ class BilirubinPredictionPipeline:
             model_stage1_path,
             model_stage2_path,
             use_stage2=use_stage2,
+            model_mode=model_mode,
             target_size=MODEL_INPUT_SIZE,
             model_backend=model_backend,
             tflite_stage1_path=tflite_stage1_path or str(MODEL_STAGE1_TFLITE_PATH),
@@ -126,6 +130,7 @@ class BilirubinPredictionPipeline:
             "palette_detected": False,
             "quality_flags": {},
             "model_backend": self.prediction_engine.model_backend,
+            "model_mode": self.prediction_engine.model_mode,
             "model_used": None,
             "inference_time_ms": None,
             "capture_attempt": 1,
@@ -160,6 +165,7 @@ class BilirubinPredictionPipeline:
         notes = self._safe_json_notes({
             "attempt": result.get("capture_attempt"),
             "attempts": result.get("capture_attempts"),
+            "model_mode": result.get("model_mode"),
             "model_used": result.get("model_used"),
             "inference_ms": result.get("inference_time_ms"),
             "gatecheck_errors": result.get("gatecheck_errors", []),
@@ -242,6 +248,7 @@ class BilirubinPredictionPipeline:
                     result["palette_detected"] = pred_info.get("palette_detected", False)
                     result["quality_flags"] = pred_info.get("quality_flags", {})
                     result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
+                    result["model_mode"] = pred_info.get("model_mode", self.prediction_engine.model_mode)
 
                     save_ok, image_path = self._save_capture_if_needed(image_bgr, result, prefix="rejected")
                     log_ok = self._log_capture_result(result, image_path if save_ok else "")
@@ -266,6 +273,7 @@ class BilirubinPredictionPipeline:
                 result["gatecheck_warnings"] = pred_info.get("gatecheck_warnings", [])
                 result["palette_detected"] = pred_info.get("palette_detected", False)
                 result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
+                result["model_mode"] = pred_info.get("model_mode", self.prediction_engine.model_mode)
                 result["model_used"] = pred_info.get("model_used")
                 result["inference_time_ms"] = pred_info.get("inference_time_ms")
                 result["error"] = None
@@ -298,6 +306,7 @@ class BilirubinPredictionPipeline:
             "preprocessing_mode": None,
             "quality_label": None,
             "quality_score": None,
+            "model_mode": self.prediction_engine.model_mode,
             "error": None,
             "timestamp": datetime.now()
         }
@@ -322,6 +331,7 @@ class BilirubinPredictionPipeline:
             result["preprocessing_mode"] = pred_info.get("preprocessing_mode", "unknown")
             result["quality_label"] = pred_info.get("quality_label", "unknown")
             result["quality_score"] = pred_info.get("quality_score", 0)
+            result["model_mode"] = pred_info.get("model_mode", self.prediction_engine.model_mode)
 
             # Log
             log_ok = self.logger.log_prediction(

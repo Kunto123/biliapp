@@ -29,6 +29,47 @@ def _numpy_major_version() -> int:
         return 0
 
 
+MODEL_MODE_STAGE1 = "stage1"
+MODEL_MODE_STAGE2 = "stage2"
+MODEL_MODE_AVERAGE = "stage1_stage2_average"
+MODEL_MODES = {MODEL_MODE_STAGE1, MODEL_MODE_STAGE2, MODEL_MODE_AVERAGE}
+MODEL_MODE_ALIASES = {
+    "1": MODEL_MODE_STAGE1,
+    "stage1": MODEL_MODE_STAGE1,
+    "stage_1": MODEL_MODE_STAGE1,
+    "stage-1": MODEL_MODE_STAGE1,
+    "stage1_only": MODEL_MODE_STAGE1,
+    "stage_1_only": MODEL_MODE_STAGE1,
+    "2": MODEL_MODE_STAGE2,
+    "stage2": MODEL_MODE_STAGE2,
+    "stage_2": MODEL_MODE_STAGE2,
+    "stage-2": MODEL_MODE_STAGE2,
+    "stage2_only": MODEL_MODE_STAGE2,
+    "stage_2_only": MODEL_MODE_STAGE2,
+    "stage1_stage2_average": MODEL_MODE_AVERAGE,
+    "stage1_stage2": MODEL_MODE_AVERAGE,
+    "stage1+stage2": MODEL_MODE_AVERAGE,
+    "stage1+2": MODEL_MODE_AVERAGE,
+    "stage1_2": MODEL_MODE_AVERAGE,
+    "1+2": MODEL_MODE_AVERAGE,
+    "stage12": MODEL_MODE_AVERAGE,
+    "average": MODEL_MODE_AVERAGE,
+    "ensemble": MODEL_MODE_AVERAGE,
+}
+
+
+def normalize_model_mode(value: Optional[str], default: str = MODEL_MODE_STAGE2) -> str:
+    """Normalize user-facing model mode aliases to internal values."""
+    normalized_default = MODEL_MODE_ALIASES.get(str(default).strip().lower(), MODEL_MODE_STAGE2)
+    if value is None:
+        return normalized_default
+    return MODEL_MODE_ALIASES.get(str(value).strip().lower(), normalized_default)
+
+
+def model_mode_uses_stage2(model_mode: str) -> bool:
+    return normalize_model_mode(model_mode) in {MODEL_MODE_STAGE2, MODEL_MODE_AVERAGE}
+
+
 class BilirubinPredictor:
     """
     Predict bilirubin level from image using trained models.
@@ -42,6 +83,7 @@ class BilirubinPredictor:
         model_stage1_path: str,
         model_stage2_path: Optional[str] = None,
         use_stage2: bool = True,
+        model_mode: Optional[str] = None,
         target_size: Tuple[int, int] = (224, 224),
         model_backend: str = "keras",
         tflite_stage1_path: Optional[str] = None,
@@ -52,7 +94,12 @@ class BilirubinPredictor:
         self.model_stage2_path = model_stage2_path
         self.tflite_stage1_path = tflite_stage1_path
         self.tflite_stage2_path = tflite_stage2_path
-        self.use_stage2 = use_stage2
+        self.requested_model_mode = normalize_model_mode(
+            model_mode,
+            MODEL_MODE_STAGE2 if use_stage2 else MODEL_MODE_STAGE1,
+        )
+        self.model_mode = self.requested_model_mode
+        self.use_stage2 = model_mode_uses_stage2(self.model_mode)
         self.target_size = target_size
         self.requested_model_backend = (model_backend or "keras").lower()
         self.model_backend = self.requested_model_backend
@@ -74,10 +121,36 @@ class BilirubinPredictor:
 
     def ensure_models_loaded(self) -> bool:
         """Reload models if the predictor is alive but model objects are missing."""
-        if self.model_stage1 is not None:
+        if self.model_stage1 is not None and (
+            self.model_mode == MODEL_MODE_STAGE1 or self.model_stage2 is not None
+        ):
             return True
         self.last_error = "Models not loaded; attempting reload"
         return self._load_models()
+
+    def set_model_mode(self, model_mode: str) -> Tuple[bool, Optional[str]]:
+        """Switch inference mode at runtime."""
+        key = str(model_mode).strip().lower()
+        if key not in MODEL_MODE_ALIASES:
+            return False, f"Mode model tidak valid: {model_mode}"
+        normalized = MODEL_MODE_ALIASES[key]
+
+        if model_mode_uses_stage2(normalized) and self.model_stage2 is None:
+            self._load_models()
+            if self.model_stage2 is None:
+                return False, "Model Stage 2 tidak tersedia atau gagal dimuat"
+
+        self.requested_model_mode = normalized
+        self.model_mode = normalized
+        self.use_stage2 = model_mode_uses_stage2(normalized)
+        self.last_error = None
+        return True, None
+
+    def _fallback_to_stage1_if_stage2_missing(self) -> None:
+        if model_mode_uses_stage2(self.model_mode) and self.model_stage2 is None:
+            print("[model] Stage 2 model not available, using stage 1 only")
+            self.model_mode = MODEL_MODE_STAGE1
+            self.use_stage2 = False
 
     def _load_models(self) -> bool:
         """Load models for the selected backend."""
@@ -106,12 +179,17 @@ class BilirubinPredictor:
             self.model_stage1 = keras.models.load_model(self.model_stage1_path)
             print(f"[model] Loaded Keras stage 1: {self.model_stage1_path}")
 
-            if self.use_stage2 and self.model_stage2_path and Path(self.model_stage2_path).exists():
-                self.model_stage2 = keras.models.load_model(self.model_stage2_path)
-                print(f"[model] Loaded Keras stage 2: {self.model_stage2_path}")
-            elif self.use_stage2:
-                print(f"[model] Stage 2 Keras model not found, using stage 1 only: {self.model_stage2_path}")
-                self.use_stage2 = False
+            self.model_stage2 = None
+            if self.model_stage2_path and Path(self.model_stage2_path).exists():
+                try:
+                    self.model_stage2 = keras.models.load_model(self.model_stage2_path)
+                    print(f"[model] Loaded Keras stage 2: {self.model_stage2_path}")
+                except Exception as exc:
+                    print(f"[model] Failed to load Keras stage 2: {exc}")
+            else:
+                print(f"[model] Stage 2 Keras model not found: {self.model_stage2_path}")
+
+            self._fallback_to_stage1_if_stage2_missing()
 
             self.last_error = None
             return True
@@ -141,13 +219,18 @@ class BilirubinPredictor:
             self.model_stage1.allocate_tensors()
             print(f"[model] Loaded TFLite stage 1: {self.tflite_stage1_path}")
 
-            if self.use_stage2 and self.tflite_stage2_path and Path(self.tflite_stage2_path).exists():
-                self.model_stage2 = Interpreter(model_path=str(self.tflite_stage2_path))
-                self.model_stage2.allocate_tensors()
-                print(f"[model] Loaded TFLite stage 2: {self.tflite_stage2_path}")
-            elif self.use_stage2:
-                print(f"[model] Stage 2 TFLite model not found, using stage 1 only: {self.tflite_stage2_path}")
-                self.use_stage2 = False
+            self.model_stage2 = None
+            if self.tflite_stage2_path and Path(self.tflite_stage2_path).exists():
+                try:
+                    self.model_stage2 = Interpreter(model_path=str(self.tflite_stage2_path))
+                    self.model_stage2.allocate_tensors()
+                    print(f"[model] Loaded TFLite stage 2: {self.tflite_stage2_path}")
+                except Exception as exc:
+                    print(f"[model] Failed to load TFLite stage 2: {exc}")
+            else:
+                print(f"[model] Stage 2 TFLite model not found: {self.tflite_stage2_path}")
+
+            self._fallback_to_stage1_if_stage2_missing()
 
             self.model_backend = "tflite"
             self.last_error = None
@@ -258,6 +341,7 @@ class BilirubinPredictor:
                     "error": self.last_error or "Models not loaded",
                     "success": False,
                     "model_backend": self.model_backend,
+                    "model_mode": self.model_mode,
                     "model_loaded": False,
                 }
 
@@ -272,6 +356,7 @@ class BilirubinPredictor:
                     "success": False,
                     "preprocessing_mode": preprocess_mode,
                     "model_backend": self.model_backend,
+                    "model_mode": self.model_mode,
                     "diagnostics": preprocess_diag,
                     "gatecheck_passed": preprocess_diag.get("gatecheck_passed", False),
                     "gatecheck_errors": preprocess_diag.get("gatecheck_errors", []),
@@ -288,7 +373,12 @@ class BilirubinPredictor:
 
             started = time.perf_counter()
             INFERENCE_TIMEOUT = 30.0  # detik
-            if self.use_stage2 and self.model_stage2 is not None:
+            if self.model_mode == MODEL_MODE_STAGE2 and self.model_stage2 is not None:
+                bilirubin_prediction = self._run_model(self.model_stage2, input_batch)
+                if time.perf_counter() - started > INFERENCE_TIMEOUT:
+                    raise TimeoutError(f"Inference stage 2 melebihi {INFERENCE_TIMEOUT}s")
+                model_used = "stage2_only"
+            elif self.model_mode == MODEL_MODE_AVERAGE and self.model_stage2 is not None:
                 pred_stage1 = self._run_model(self.model_stage1, input_batch)
                 if time.perf_counter() - started > INFERENCE_TIMEOUT:
                     raise TimeoutError(f"Inference stage 1 melebihi {INFERENCE_TIMEOUT}s")
@@ -315,6 +405,7 @@ class BilirubinPredictor:
                 "success": True,
                 "bilirubin_prediction": bilirubin_prediction,
                 "model_backend": self.model_backend,
+                "model_mode": self.model_mode,
                 "model_used": model_used,
                 "inference_time_ms": self.last_inference_time_ms,
                 "preprocessing_mode": preprocess_mode,
@@ -341,6 +432,7 @@ class BilirubinPredictor:
                 "error": self.last_error,
                 "bilirubin_prediction": None,
                 "model_backend": self.model_backend,
+                "model_mode": self.model_mode,
             }
 
     def predict_from_file(
@@ -381,14 +473,15 @@ class BilirubinPredictor:
         return {
             "requested_backend": self.requested_model_backend,
             "model_backend": self.model_backend,
+            "requested_model_mode": self.requested_model_mode,
+            "model_mode": self.model_mode,
             "tflite_runtime": self.tflite_runtime,
             "stage1_loaded": self.model_stage1 is not None,
             "stage2_loaded": self.model_stage2 is not None,
-            "using_stage2": self.use_stage2 and self.model_stage2 is not None,
+            "stage2_available": self.model_stage2 is not None,
+            "using_stage2": model_mode_uses_stage2(self.model_mode) and self.model_stage2 is not None,
             "stage1_path": self.model_stage1_path if self.model_backend == "keras" else self.tflite_stage1_path,
-            "stage2_path": (
-                self.model_stage2_path if self.model_backend == "keras" else self.tflite_stage2_path
-            ) if self.use_stage2 else None,
+            "stage2_path": self.model_stage2_path if self.model_backend == "keras" else self.tflite_stage2_path,
             "target_size": self.target_size,
             "last_inference_time_ms": self.last_inference_time_ms,
             "error": self.last_error,

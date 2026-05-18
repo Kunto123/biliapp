@@ -1,12 +1,15 @@
 """
 data_artifacts.py
 
-Calibration reference values extracted from training set.
-These are hard-coded values computed from the notebook's training phase.
-Used for white balance and palette color correction during preprocessing.
+Calibration reference values used by runtime preprocessing.
+
+The model was trained on aligned card images corrected against observed card
+patch statistics from the notebook pipeline, not against raw Canva hex values.
+The default references below keep inference closer to the model's training
+distribution. Canva design values are retained as a separate profile for
+diagnostics or future recalibration work.
 """
 
-import numpy as np
 import pandas as pd
 
 # ===== WARP & ALIGNMENT CONFIGURATION =====
@@ -51,28 +54,50 @@ SHRINK_RATIOS = {
     "color_patches": 0.12,     # Default for color patches
 }
 
-# ===== WHITE BALANCE REFERENCE (from training set) =====
-# Target gray level from printed gray patch: #737373 → R=G=B=115
-TARGET_GRAY_LEVEL = 115.0
+# ===== WHITE BALANCE REFERENCE =====
+# Notebook Cell 7 train-split gray target.
+TARGET_GRAY_LEVEL = 100.33
 
-# Gray patch reference colors — printed color: #737373 (R=115, G=115, B=115)
-GRAY_PATCHES_REFERENCE_DF = pd.DataFrame({
+# Notebook Cell 7 train-split gray patch medians.
+NOTEBOOK_GRAY_PATCHES_REFERENCE_DF = pd.DataFrame({
+    "roi_name": ["gray_tl", "gray_tr", "gray_bl", "gray_br"],
+    "r_ref": [89.0, 84.0, 100.0, 101.0],
+    "g_ref": [97.0, 92.0, 110.0, 109.0],
+    "b_ref": [97.0, 94.0, 110.0, 109.0],
+})
+
+# Canva design profile for printed #737373 gray patch.
+CANVA_GRAY_PATCHES_REFERENCE_DF = pd.DataFrame({
     "roi_name": ["gray_tl", "gray_tr", "gray_bl", "gray_br"],
     "r_ref": [115.0, 115.0, 115.0, 115.0],
     "g_ref": [115.0, 115.0, 115.0, 115.0],
     "b_ref": [115.0, 115.0, 115.0, 115.0],
 })
 
-# ===== PALETTE CORRECTION REFERENCE (from training set) =====
-# Reference colors derived from Canva design printed on photo paper:
+# Runtime default: training-compatible notebook references.
+GRAY_PATCHES_REFERENCE_DF = NOTEBOOK_GRAY_PATCHES_REFERENCE_DF.copy()
+
+# ===== PALETTE CORRECTION REFERENCE =====
+# Notebook Cell 6 observed ROI RGB summary from aligned training-card images.
+NOTEBOOK_REFERENCE_PALETTE_DF = pd.DataFrame({
+    "roi_name": ["yellow_patch", "navy_patch", "blue_patch", "red_patch", "pink_patch", "green_patch"],
+    "r_ref": [217.20,  28.34,   9.70, 192.47, 189.01,  29.68],
+    "g_ref": [184.62,  52.15, 105.25,  77.59,  64.77, 108.25],
+    "b_ref": [ 63.39, 104.40, 165.91,  60.19,  95.60,  75.68],
+})
+
+# Canva design profile, not used by default:
 #   yellow  #ffde59  navy  #1800ad  blue(cyan)  #38b6ff
 #   red     #ff3131  pink  #ff66c4  green       #00bf36
-REFERENCE_PALETTE_DF = pd.DataFrame({
+CANVA_REFERENCE_PALETTE_DF = pd.DataFrame({
     "roi_name": ["yellow_patch", "navy_patch", "blue_patch", "red_patch", "pink_patch", "green_patch"],
     "r_ref": [255.0,  24.0,  56.0, 255.0, 255.0,   0.0],
     "g_ref": [222.0,   0.0, 182.0,  49.0, 102.0, 191.0],
     "b_ref": [ 89.0, 173.0, 255.0,  49.0, 196.0,  54.0],
 })
+
+# Runtime default: training-compatible notebook references.
+REFERENCE_PALETTE_DF = NOTEBOOK_REFERENCE_PALETTE_DF.copy()
 
 # ===== QUALITY ASSESSMENT THRESHOLDS =====
 EXPOSURE_V_RANGE = (70, 225)              # HSV V (brightness) acceptable range

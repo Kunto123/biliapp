@@ -134,6 +134,37 @@ def _env_rotation(name: str, default: int) -> int:
     value = _env_int(name, default)
     return value if value in {0, 90, 180, 270} else default
 
+
+def _normalize_model_mode(value: str | None, default: str = "stage2") -> str:
+    aliases = {
+        "1": "stage1",
+        "stage1": "stage1",
+        "stage_1": "stage1",
+        "stage-1": "stage1",
+        "stage1_only": "stage1",
+        "stage_1_only": "stage1",
+        "2": "stage2",
+        "stage2": "stage2",
+        "stage_2": "stage2",
+        "stage-2": "stage2",
+        "stage2_only": "stage2",
+        "stage_2_only": "stage2",
+        "stage1_stage2_average": "stage1_stage2_average",
+        "stage1_stage2": "stage1_stage2_average",
+        "stage1+stage2": "stage1_stage2_average",
+        "stage1+2": "stage1_stage2_average",
+        "stage1_2": "stage1_stage2_average",
+        "1+2": "stage1_stage2_average",
+        "stage12": "stage1_stage2_average",
+        "average": "stage1_stage2_average",
+        "ensemble": "stage1_stage2_average",
+    }
+    normalized_default = aliases.get(str(default).strip().lower(), "stage2")
+    if value is None:
+        return normalized_default
+    key = value.strip().lower()
+    return aliases.get(key, normalized_default)
+
 # ===== PATHS =====
 LOGS_DIR = PROJECT_ROOT / "logs"
 IMAGES_DIR = PROJECT_ROOT / "data" / "captures"
@@ -152,7 +183,10 @@ MODEL_STAGE2_TFLITE_PATH = MODELS_DIR / "models" / "best_model_stage2.tflite"
 
 # ===== MODEL CONFIGURATION =====
 MODEL_BACKEND = os.getenv("BILIRUBIN_MODEL_BACKEND", "tflite" if IS_RASPBERRY_PI else "keras").strip().lower()
-USE_STAGE2 = _env_bool("BILIRUBIN_USE_STAGE2", True)
+_LEGACY_USE_STAGE2 = _env_bool("BILIRUBIN_USE_STAGE2", True)
+_LEGACY_MODEL_MODE = "stage2" if _LEGACY_USE_STAGE2 else "stage1"
+MODEL_MODE = _normalize_model_mode(os.getenv("BILIRUBIN_MODEL_MODE"), _LEGACY_MODEL_MODE)
+USE_STAGE2 = MODEL_MODE != "stage1"
 MODEL_INPUT_SIZE = (224, 224)  # Input size for EfficientNetB0
 
 # ===== CAMERA CONFIGURATION =====
@@ -224,10 +258,11 @@ BATCH_SIZE = 1  # For inference
 print("[Config] Configuration loaded from:", __file__)
 print("[Config] .env:", DOTENV_PATH if _DOTENV_LOADED else "not found")
 print(
-    "[Config] device=%s backend=%s camera=%s resolution=%sx%s rotation=%s"
+    "[Config] device=%s backend=%s model_mode=%s camera=%s resolution=%sx%s rotation=%s"
     % (
         DEVICE_PROFILE,
         MODEL_BACKEND,
+        MODEL_MODE,
         CAMERA_TYPE,
         CAMERA_RESOLUTION[0],
         CAMERA_RESOLUTION[1],

@@ -19,6 +19,7 @@ const state = {
   currentScreen: 'screen-splash',
   cameraTimer: null,
   cameraStatusTimer: null,
+  modelMode: 'stage2',
   useStage2: true,
   lastImageB64: null,
   lastPrediction: null,
@@ -221,6 +222,42 @@ function optionHtml(value, label, selectedValue) {
 function renderResolutionOptions(selectedValue, presets) {
   const values = presets.includes(selectedValue) ? presets : [selectedValue, ...presets].filter(Boolean);
   return values.map(value => optionHtml(value, value, selectedValue)).join('');
+}
+
+function normalizeModelMode(mode) {
+  const value = String(mode || '').trim().toLowerCase();
+  if (value === 'stage1' || value === 'stage1_only') return 'stage1';
+  if (value === 'stage2' || value === 'stage2_only') return 'stage2';
+  if (['stage1_stage2_average', 'stage1_stage2', 'stage1+stage2', 'stage1+2', 'stage12', '1+2', 'average', 'ensemble'].includes(value)) {
+    return 'stage1_stage2_average';
+  }
+  return 'stage2';
+}
+
+function modelModeLabel(mode) {
+  const normalized = normalizeModelMode(mode);
+  if (normalized === 'stage1') return 'Stage 1 saja';
+  if (normalized === 'stage2') return 'Stage 2 saja';
+  return 'Stage 1 + Stage 2';
+}
+
+function saveModelMode(mode) {
+  try {
+    localStorage.setItem('bilirubin.modelMode', normalizeModelMode(mode));
+  } catch { /* localStorage may be unavailable */ }
+}
+
+function loadSavedModelMode() {
+  try {
+    return localStorage.getItem('bilirubin.modelMode');
+  } catch {
+    return null;
+  }
+}
+
+function applyModelModeState(mode) {
+  state.modelMode = normalizeModelMode(mode);
+  state.useStage2 = state.modelMode !== 'stage1';
 }
 
 function updateCaptureButton() {
@@ -470,7 +507,7 @@ const App = {
               ['Backend',   mdl.model_backend ?? runtime.model_backend ?? '?'],
               ['Stage 1',   mdl.stage1_loaded ? 'Dimuat ✓' : 'Tidak tersedia'],
               ['Stage 2',   mdl.stage2_loaded ? 'Dimuat ✓' : 'Tidak tersedia'],
-              ['Digunakan', mdl.using_stage2  ? 'Stage 1 + 2' : 'Stage 1 saja'],
+              ['Digunakan', modelModeLabel(mdl.model_mode ?? runtime.model_mode)],
               ['Latency',   mdl.last_inference_time_ms != null ? `${mdl.last_inference_time_ms} ms` : '-'],
             ],
           },
@@ -627,28 +664,32 @@ const App = {
   // ── Model select ──────────────────────────────────────────────────────────
   goModelSelect() {
     showScreen('screen-model', () => {
-      const r2 = document.getElementById('radio-stage2');
-      const r1 = document.getElementById('radio-stage1');
-      if (state.useStage2) { r2.checked = true; } else { r1.checked = true; }
-      document.getElementById('model-msg').textContent = '';
+      const selected = document.querySelector(`input[name="model-mode"][value="${state.modelMode}"]`);
+      if (selected) selected.checked = true;
+      const msg = document.getElementById('model-msg');
+      msg.style.color = 'var(--ok)';
+      msg.textContent = '';
     });
   },
 
   async applyModelSettings() {
-    const useStage2 = document.getElementById('radio-stage2').checked;
+    const selected = document.querySelector('input[name="model-mode"]:checked');
+    const modelMode = normalizeModelMode(selected?.value);
+    const msg = document.getElementById('model-msg');
     try {
-      const r = await apiPost('/api/settings/model', { use_stage2: useStage2 });
+      const r = await apiPost('/api/settings/model', { model_mode: modelMode });
       if (r.success) {
-        state.useStage2 = useStage2;
-        const label = useStage2 ? 'Stage 1 + Stage 2' : 'Stage 1 saja';
-        document.getElementById('model-msg').textContent = `✓ Mode inferensi: ${label}`;
+        applyModelModeState(r.model_mode || modelMode);
+        saveModelMode(state.modelMode);
+        msg.style.color = 'var(--ok)';
+        msg.textContent = `✓ Mode inferensi: ${modelModeLabel(state.modelMode)}`;
       } else {
-        document.getElementById('model-msg').style.color = 'var(--err)';
-        document.getElementById('model-msg').textContent = '✗ Gagal menerapkan pengaturan';
+        msg.style.color = 'var(--err)';
+        msg.textContent = r.error || '✗ Gagal menerapkan pengaturan';
       }
     } catch {
-      document.getElementById('model-msg').style.color = 'var(--err)';
-      document.getElementById('model-msg').textContent = '✗ Gagal menghubungi server';
+      msg.style.color = 'var(--err)';
+      msg.textContent = '✗ Gagal menghubungi server';
     }
   },
 
@@ -776,7 +817,7 @@ function renderCaptureResult(result) {
   const qual = `${String(result.quality_label ?? '?').toUpperCase()}  (${result.quality_score ?? 0}/100)`;
   const mode = result.preprocessing_mode ?? '?';
   const palette = result.palette_detected ? 'Terdeteksi' : 'Tidak terdeteksi';
-  const inference = `${result.model_backend ?? '?'} / ${result.model_used ?? '?'}`;
+  const inference = `${result.model_backend ?? '?'} / ${modelModeLabel(result.model_mode || result.model_used)}`;
   const latency = result.inference_time_ms != null ? `${Number(result.inference_time_ms).toFixed(1)} ms` : '-';
 
   const rawAlignedReason = result.palette_detected
@@ -824,8 +865,18 @@ async function waitForServer() {
       const s = await apiGet('/api/status');
       if (s) {
         const runtime = s.runtime_config ?? {};
+        const models = s.models ?? {};
         state.previewPollMs = runtime.preview_poll_ms ?? DEFAULT_PREVIEW_POLL_MS;
         state.previewStatusMs = Math.max(DEFAULT_PREVIEW_STATUS_MS, runtime.preview_poll_ms ?? DEFAULT_PREVIEW_STATUS_MS);
+        applyModelModeState(models.model_mode ?? runtime.model_mode ?? (runtime.use_stage2 ? 'stage2' : 'stage1'));
+
+        const savedModelMode = loadSavedModelMode();
+        if (savedModelMode && normalizeModelMode(savedModelMode) !== state.modelMode) {
+          const modelResp = await apiPost('/api/settings/model', { model_mode: normalizeModelMode(savedModelMode) });
+          if (modelResp?.success) {
+            applyModelModeState(modelResp.model_mode || savedModelMode);
+          }
+        }
         statusEl.textContent = '✓ Terhubung!';
         await new Promise(r => setTimeout(r, 400));
         App.goHome();
