@@ -237,6 +237,13 @@ function startCamera() {
   setCameraStatus(null);
   const img = document.getElementById('cam-img');
   const ph  = document.getElementById('cam-placeholder');
+  let streamStarted = false;
+
+  const openPreviewStream = () => {
+    if (!img || streamStarted || state.isCapturing) return;
+    streamStarted = true;
+    img.src = `${API}/api/camera/stream?ts=${Date.now()}`;
+  };
 
   if (img) {
     img.onload = () => {
@@ -248,15 +255,22 @@ function startCamera() {
       ph.style.display = 'flex';
       setCameraStatus({ available: false });
     };
-    img.src = `${API}/api/camera/stream?ts=${Date.now()}`;
+  }
+
+  if (state.isCapturing) {
+    setCameraStatus({ busy: true });
+  } else {
+    openPreviewStream();
   }
 
   async function tickStatus() {
     if (state.currentScreen !== 'screen-home') return;
     if (state.isCapturing) {
+      setCameraStatus({ busy: true });
       state.cameraStatusTimer = setTimeout(tickStatus, state.previewStatusMs);
       return;
     }
+    openPreviewStream();
     try {
       const [d, gpioData] = await Promise.all([
         apiGet('/api/camera/preview/status'),
@@ -369,6 +383,9 @@ const App = {
     } finally {
       state.isCapturing = false;
       updateCaptureButton();
+      if (state.currentScreen === 'screen-home') {
+        startCamera();
+      }
     }
   },
 
