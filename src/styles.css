@@ -339,6 +339,15 @@ html, body {
   color: var(--text);
 }
 
+.image-preview {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: calc(var(--app-height) - 170px);
+  object-fit: contain;
+  background: #000;
+}
+
 /* ── Divider ───────────────────────────────────────────────────────────── */
 .divider { height: 1px; background: var(--divider); }
 

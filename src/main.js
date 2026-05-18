@@ -762,8 +762,11 @@ function renderCaptureResult(result) {
   const inference = `${result.model_backend ?? '?'} / ${result.model_used ?? '?'}`;
   const latency = result.inference_time_ms != null ? `${Number(result.inference_time_ms).toFixed(1)} ms` : '-';
 
+  const rawAlignedReason = result.palette_detected
+    ? 'mode raw_aligned - koreksi warna tidak diterapkan karena kualitas kalibrasi belum cukup stabil'
+    : 'palette tidak terdeteksi - mode raw_aligned';
   const rawAlignedBanner = mode === 'raw_aligned'
-    ? `<div class="result-mode-warn">Peringatan: palette tidak terdeteksi — mode raw_aligned, akurasi prediksi lebih rendah</div>`
+    ? `<div class="result-mode-warn">Peringatan: ${rawAlignedReason}, akurasi prediksi lebih rendah</div>`
     : '';
   const logWarnBanner = result.log_warning
     ? `<div class="result-mode-warn">Peringatan: ${esc(result.log_warning)}</div>`

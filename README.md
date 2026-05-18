@@ -74,7 +74,7 @@ Target runtime: Raspberry Pi 5, Ubuntu 64-bit, ArduCam Hawkeye 64MP through libc
    BILIRUBIN_DEVICE=raspi5
    BILIRUBIN_CAMERA_TYPE=libcamera
    BILIRUBIN_MODEL_BACKEND=tflite
-   BILIRUBIN_USE_STAGE2=false
+   BILIRUBIN_USE_STAGE2=true
    BILIRUBIN_PREVIEW_FPS=30
    BILIRUBIN_PREVIEW_MIN_FPS=30
    ```
