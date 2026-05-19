@@ -161,6 +161,24 @@ class BilirubinPredictionPipeline:
             result["image_save_warning"] = image_path
         return save_ok, image_path
 
+    def _save_processed_image_if_available(self, pred_info: Dict, result: Dict) -> None:
+        processed_rgb = pred_info.get("_processed_image_rgb")
+        if processed_rgb is None:
+            return
+        try:
+            processed_bgr = cv2.cvtColor(processed_rgb, cv2.COLOR_RGB2BGR)
+            save_ok, image_path = self.storage.save_image(
+                processed_bgr,
+                prefix="aligned",
+                timestamp=result["timestamp"],
+            )
+            if save_ok:
+                result["aligned_image_path"] = image_path
+            else:
+                result["aligned_image_save_warning"] = image_path
+        except Exception as exc:
+            result["aligned_image_save_warning"] = str(exc)
+
     def _log_capture_result(self, result: Dict, image_path: str = "") -> bool:
         notes = self._safe_json_notes({
             "attempt": result.get("capture_attempt"),
@@ -279,6 +297,7 @@ class BilirubinPredictionPipeline:
                 result["error"] = None
 
                 save_ok, image_path = self._save_capture_if_needed(image_bgr, result, prefix="capture")
+                self._save_processed_image_if_available(pred_info, result)
                 log_ok = self._log_capture_result(result, image_path if save_ok else "")
                 if not log_ok:
                     result["log_warning"] = f"Gagal menulis log: {self.logger.last_write_error}"

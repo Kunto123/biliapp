@@ -344,10 +344,10 @@ def _enqueue_capture_result(result: dict, baby: dict) -> None:
         "captured_at": captured_at,
         "age_hours": _age_hours(baby, captured_at),
         "bilirubin_mgdl": result.get("bilirubin_prediction") if success else None,
-        "has_image": bool(result.get("image_path")),
+        "has_image": bool(result.get("aligned_image_path") or result.get("image_path")),
         "device_id": sync_service.device_id if sync_service is not None else offline_store.get_device_id(BILIRUBIN_DEVICE_ID),
         "model_version": _result_model_version(result),
-        "image_path": result.get("image_path"),
+        "image_path": result.get("aligned_image_path") or result.get("image_path"),
         "preprocessing_mode": result.get("preprocessing_mode"),
         "quality_label": result.get("quality_label"),
         "quality_score": result.get("quality_score"),
@@ -922,6 +922,8 @@ def _latest_capture_path() -> Optional[Path]:
             try:
                 stat = path.stat()
             except OSError:
+                continue
+            if path.name.startswith("aligned_"):
                 continue
             if path.is_file() and stat.st_mtime > latest_mtime:
                 latest_path = path

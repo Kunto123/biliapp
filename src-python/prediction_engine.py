@@ -422,6 +422,7 @@ class BilirubinPredictor:
             if return_diagnostics:
                 result["diagnostics"] = preprocess_diag
                 result["metrics"] = preprocess_diag.get("metrics", {})
+                result["_processed_image_rgb"] = preprocessed_rgb
 
             return bilirubin_prediction, result
 
