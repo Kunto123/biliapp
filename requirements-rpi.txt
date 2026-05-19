@@ -5,7 +5,6 @@
 
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
-cryptography>=42.0.0
 # tflite-runtime wheels are compiled against the NumPy 1.x C API.
 # NumPy 2.x can fail at interpreter creation with: AttributeError: _ARRAY_API not found.
 numpy>=1.26.0,<2.0

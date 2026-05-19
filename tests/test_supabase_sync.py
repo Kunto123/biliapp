@@ -2,7 +2,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +59,6 @@ class SupabaseSyncTests(unittest.TestCase):
                         device_id="dev-1",
                         device_name="Device 1",
                         hospital_id="00000000-0000-0000-0000-000000000000",
-                        image_encryption_key="test-secret",
                     ),
                 )
                 fake = FakeSupabaseClient()
@@ -83,16 +81,18 @@ class SupabaseSyncTests(unittest.TestCase):
                     "success": True,
                 })
 
-                with mock.patch("supabase_sync.encrypt_image_file", return_value=b"encrypted"):
-                    status = service.sync_once()
+                status = service.sync_once()
 
                 self.assertTrue(status["success"])
                 self.assertEqual(status["synced_this_run"], 1)
                 self.assertEqual(fake.upserted_devices, [])
                 self.assertEqual(store.get_sync_counts()["synced"], 1)
                 self.assertEqual(fake.uploads[0][0], "measurement-images")
+                self.assertEqual(fake.uploads[0][1], "dev-1/m-1.jpg")
+                self.assertEqual(fake.uploads[0][2], b"fake-jpeg")
+                self.assertEqual(fake.uploads[0][3], "image/jpeg")
                 self.assertEqual(fake.inserted_measurements[0]["baby_id"], 7)
-                self.assertEqual(fake.inserted_measurements[0]["encrypted_image_ref"], "measurement-images/dev-1/m-1.jpg.enc")
+                self.assertEqual(fake.inserted_measurements[0]["encrypted_image_ref"], "measurement-images/dev-1/m-1.jpg")
             finally:
                 store.close()
 

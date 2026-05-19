@@ -2,16 +2,13 @@
 supabase_sync.py
 
 Minimal Supabase REST/Storage client and sync worker for the offline-first queue.
-Uses stdlib HTTP so Raspberry Pi dependencies stay small; image encryption uses
-cryptography AES-GCM when BILIRUBIN_IMAGE_ENCRYPTION_KEY is configured.
+Uses stdlib HTTP so Raspberry Pi dependencies stay small. Images are uploaded
+as regular JPEG files so Supabase Storage can preview them directly.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
-import os
 import threading
 import time
 import urllib.error
@@ -153,36 +150,6 @@ class SupabaseClient:
             headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
 
-
-def _derive_aes_key(key_text: str) -> bytes:
-    key_text = (key_text or "").strip()
-    if not key_text:
-        raise SupabaseError("BILIRUBIN_IMAGE_ENCRYPTION_KEY belum diisi")
-
-    for candidate in (key_text, key_text + "==="):
-        try:
-            decoded = base64.urlsafe_b64decode(candidate.encode("utf-8"))
-            if len(decoded) in {16, 24, 32}:
-                return decoded
-        except Exception:
-            pass
-    return hashlib.sha256(key_text.encode("utf-8")).digest()
-
-
-def encrypt_image_file(image_path: str | Path, key_text: str) -> bytes:
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    except Exception as exc:
-        raise SupabaseError("Dependency cryptography belum terinstall untuk enkripsi gambar") from exc
-
-    path = Path(image_path)
-    data = path.read_bytes()
-    key = _derive_aes_key(key_text)
-    nonce = os.urandom(12)
-    ciphertext = AESGCM(key).encrypt(nonce, data, None)
-    return b"BILIENC1" + nonce + ciphertext
-
-
 @dataclass
 class SyncConfig:
     supabase_url: str = ""
@@ -191,7 +158,6 @@ class SyncConfig:
     device_name: str = ""
     hospital_id: str = ""
     storage_bucket: str = "measurement-images"
-    image_encryption_key: str = ""
     interval_seconds: int = 60
     sync_device_registry: bool = False
 
@@ -272,7 +238,7 @@ class SupabaseSyncService:
             for row in self.store.get_pending_measurements(limit=limit):
                 try:
                     image_ref = row.get("encrypted_image_ref")
-                    if row.get("has_image") and not image_ref:
+                    if row.get("has_image") and (not image_ref or str(image_ref).endswith(".jpg.enc")):
                         image_ref = self._upload_measurement_image(row)
                         self.store.update_measurement_image_ref(row["measurement_id"], image_ref)
 
@@ -330,13 +296,13 @@ class SupabaseSyncService:
         image_path = row.get("image_path")
         if not image_path:
             raise SupabaseError("Measurement tidak punya image_path")
-        encrypted = encrypt_image_file(image_path, self.config.image_encryption_key)
-        object_path = f"{self.device_id}/{row['measurement_id']}.jpg.enc"
+        image_bytes = Path(image_path).read_bytes()
+        object_path = f"{self.device_id}/{row['measurement_id']}.jpg"
         return self.client.upload_storage_object(
             self.config.storage_bucket,
             object_path,
-            encrypted,
-            content_type="application/octet-stream",
+            image_bytes,
+            content_type="image/jpeg",
         )
 
     def _remote_measurement_payload(
