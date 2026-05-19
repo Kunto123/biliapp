@@ -88,10 +88,37 @@ class SupabaseSyncTests(unittest.TestCase):
 
                 self.assertTrue(status["success"])
                 self.assertEqual(status["synced_this_run"], 1)
+                self.assertEqual(fake.upserted_devices, [])
                 self.assertEqual(store.get_sync_counts()["synced"], 1)
                 self.assertEqual(fake.uploads[0][0], "measurement-images")
                 self.assertEqual(fake.inserted_measurements[0]["baby_id"], 7)
                 self.assertEqual(fake.inserted_measurements[0]["encrypted_image_ref"], "measurement-images/dev-1/m-1.jpg.enc")
+            finally:
+                store.close()
+
+    def test_device_registry_sync_does_not_send_hospital_id_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OfflineStore(Path(tmp) / "offline_sync.db")
+            try:
+                service = SupabaseSyncService(
+                    store,
+                    SyncConfig(
+                        supabase_url="https://example.supabase.co",
+                        supabase_key="key",
+                        device_id="dev-1",
+                        device_name="Device 1",
+                        hospital_id="should-not-be-sent",
+                        sync_device_registry=True,
+                    ),
+                )
+                fake = FakeSupabaseClient()
+                service.client = fake
+
+                service.sync_once()
+
+                self.assertEqual(len(fake.upserted_devices), 1)
+                self.assertNotIn("hospital_id", fake.upserted_devices[0])
+                self.assertFalse(fake.upserted_devices[0]["is_paired"])
             finally:
                 store.close()
 

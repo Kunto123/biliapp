@@ -47,6 +47,7 @@ from config import (
     BILIRUBIN_HOSPITAL_ID,
     BILIRUBIN_IMAGE_ENCRYPTION_KEY,
     BILIRUBIN_SUPABASE_BUCKET,
+    BILIRUBIN_SYNC_DEVICE_REGISTRY,
     BILIRUBIN_SYNC_INTERVAL_SECONDS,
     DEVICE_PROFILE,
     CAMERA_CAPTURE_IMMEDIATE,
@@ -389,6 +390,7 @@ async def startup():
                 storage_bucket=BILIRUBIN_SUPABASE_BUCKET,
                 image_encryption_key=BILIRUBIN_IMAGE_ENCRYPTION_KEY,
                 interval_seconds=BILIRUBIN_SYNC_INTERVAL_SECONDS,
+                sync_device_registry=BILIRUBIN_SYNC_DEVICE_REGISTRY,
             ),
         )
         sync_service.start()

@@ -193,6 +193,7 @@ class SyncConfig:
     storage_bucket: str = "measurement-images"
     image_encryption_key: str = ""
     interval_seconds: int = 60
+    sync_device_registry: bool = False
 
 
 class SupabaseSyncService:
@@ -265,7 +266,8 @@ class SupabaseSyncService:
         try:
             if refresh_babies:
                 self.refresh_babies()
-            self._upsert_device()
+            if self.config.sync_device_registry:
+                self._upsert_device()
 
             for row in self.store.get_pending_measurements(limit=limit):
                 try:
@@ -319,11 +321,9 @@ class SupabaseSyncService:
             "device_id": self.device_id,
             "display_name": self.config.device_name or self.device_id,
             "transport": "raspi-offline-sync",
-            "is_paired": bool(self.config.hospital_id),
+            "is_paired": False,
             "last_seen_at": utc_now_iso(),
         }
-        if self.config.hospital_id:
-            payload["hospital_id"] = self.config.hospital_id
         self.client.upsert_device(payload)
 
     def _upload_measurement_image(self, row: dict[str, Any]) -> str:
