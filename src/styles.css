@@ -330,6 +330,163 @@ html, body {
 }
 
 /* ── History table ─────────────────────────────────────────────────────── */
+#screen-capture .content {
+  width: 100%;
+  max-width: none;
+  padding: 10px var(--edge-r) 10px var(--edge-x);
+  overflow: hidden;
+  display: flex;
+  min-height: 0;
+}
+
+#screen-image .content {
+  width: 100%;
+  max-width: none;
+  padding: 10px var(--edge-r) 8px var(--edge-x);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.capture-result-layout {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1.12fr) minmax(250px, 0.88fr);
+  gap: 10px;
+}
+
+.capture-image-pane {
+  min-width: 0;
+  min-height: 0;
+  background: #000;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.capture-result-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.capture-image-empty {
+  color: rgba(255,255,255,0.72);
+  font-size: 13px;
+  text-align: center;
+  padding: 18px;
+}
+
+.capture-summary-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.result-card.compact {
+  flex-shrink: 0;
+  margin-bottom: 0;
+  padding: 10px 12px 12px;
+}
+
+.result-card.compact .result-status {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+
+.result-card.compact .result-title {
+  font-size: 18px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.result-card.compact .result-num {
+  font-size: 52px;
+  line-height: 0.95;
+  padding-top: 0;
+}
+
+.result-card.compact .result-unit {
+  font-size: 15px;
+  margin-top: 0;
+}
+
+.result-card.compact .result-level {
+  font-size: 12px;
+  padding: 5px 0 0;
+}
+
+.result-compact-text,
+.result-helper {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.result-helper {
+  margin-top: 8px;
+  color: var(--text-sub);
+}
+
+.result-detail-card {
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 0;
+  overflow: hidden;
+}
+
+.result-detail-card .info-row {
+  padding: 7px 10px;
+}
+
+.result-detail-card .info-label {
+  min-width: 82px;
+  font-size: 11px;
+}
+
+.result-detail-card .info-value {
+  font-size: 12px;
+}
+
+.gate-list.compact {
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 6px 0 0 16px;
+}
+
+.last-image-view {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  background: #000;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.last-image-caption {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 6px;
+  color: var(--text-sub);
+  font-size: 12px;
+}
+
 .history-table {
   font-family: 'Courier New', Consolas, monospace;
   font-size: 11px;
@@ -342,6 +499,7 @@ html, body {
 .image-preview {
   display: block;
   width: 100%;
+  height: 100%;
   max-width: 100%;
   max-height: calc(var(--app-height) - 170px);
   object-fit: contain;
@@ -729,6 +887,25 @@ html, body {
 }
 
 /* ── Responsive device shapes ──────────────────────────────────────────── */
+@media (orientation: portrait), (max-width: 620px) {
+  .capture-result-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 42%) minmax(0, 1fr);
+  }
+
+  .capture-summary-pane {
+    gap: 7px;
+  }
+
+  .result-card.compact .result-num {
+    font-size: 42px;
+  }
+
+  .result-detail-card .info-row {
+    padding: 6px 10px;
+  }
+}
+
 @media (max-width: 420px) {
   :root {
     --content-max: 100%;
@@ -791,6 +968,11 @@ html, body {
   .back-bar { padding-top: 5px; }
   .btn-back { height: 38px; }
   .result-num { font-size: 42px; }
+  #screen-capture .content { padding-top: 8px; padding-bottom: 8px; }
+  .result-card.compact { padding: 8px 10px 9px; }
+  .result-card.compact .result-num { font-size: 38px; }
+  .result-card.compact .result-title { font-size: 16px; margin-bottom: 6px; }
+  .result-detail-card .info-row { padding: 5px 9px; }
 
   .camera-controls {
     min-height: var(--camera-controls-space);

@@ -659,6 +659,55 @@ async def get_history(limit: int = 10):
     return {"records": pipeline.get_last_results(num=limit)}
 
 
+def _latest_capture_path() -> Optional[Path]:
+    base_dir = Path(getattr(pipeline, "images_dir", BASE_DIR / "data" / "captures"))
+    if not base_dir.exists():
+        return None
+
+    latest_path: Optional[Path] = None
+    latest_mtime = -1.0
+    try:
+        candidates = base_dir.rglob("*.jpg")
+        for path in candidates:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if path.is_file() and stat.st_mtime > latest_mtime:
+                latest_path = path
+                latest_mtime = stat.st_mtime
+    except OSError:
+        return None
+    return latest_path
+
+
+@app.get("/api/images/latest")
+async def get_latest_image():
+    path = _latest_capture_path()
+    if path is None:
+        return {"success": False, "image_b64": None, "error": "Belum ada foto tersimpan"}
+
+    img = cv2.imread(str(path))
+    if img is None:
+        return {"success": False, "image_b64": None, "error": f"Gagal membaca gambar: {path.name}"}
+
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        return {"success": False, "image_b64": None, "error": f"Gagal encode gambar: {path.name}"}
+
+    stat = path.stat()
+    return {
+        "success": True,
+        "image_b64": base64.b64encode(buf).decode(),
+        "image_path": str(path),
+        "filename": path.name,
+        "width": int(img.shape[1]),
+        "height": int(img.shape[0]),
+        "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stat.st_mtime)),
+        "size_bytes": int(stat.st_size),
+    }
+
+
 @app.get("/api/stats")
 async def get_stats():
     if pipeline is None:

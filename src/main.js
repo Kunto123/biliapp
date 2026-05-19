@@ -22,6 +22,7 @@ const state = {
   modelMode: 'stage2',
   useStage2: true,
   lastImageB64: null,
+  lastImageMeta: null,
   lastPrediction: null,
   previewPollMs: DEFAULT_PREVIEW_POLL_MS,
   previewStatusMs: DEFAULT_PREVIEW_STATUS_MS,
@@ -202,6 +203,33 @@ function updateLastThumb() {
   }
 }
 
+function setLastImageFromPayload(payload) {
+  if (!payload?.image_b64) return false;
+  state.lastImageB64 = payload.image_b64;
+  state.lastImageMeta = {
+    filename: payload.filename ?? payload.image_path?.split(/[\\/]/).pop() ?? null,
+    image_path: payload.image_path ?? null,
+    width: payload.width ?? null,
+    height: payload.height ?? null,
+    modified_at: payload.modified_at ?? payload.timestamp ?? null,
+  };
+  updateLastThumb();
+  return true;
+}
+
+async function refreshLastImageFromDisk() {
+  try {
+    const payload = await apiGet('/api/images/latest');
+    if (payload?.success && setLastImageFromPayload(payload)) {
+      return true;
+    }
+  } catch {
+    // Keep the in-memory image if the backend is temporarily unavailable.
+  }
+  updateLastThumb();
+  return false;
+}
+
 function resolutionValue(res) {
   if (!res) return '';
   const width = Array.isArray(res) ? res[0] : res.width;
@@ -378,6 +406,7 @@ const App = {
   goHome() {
     showScreen('screen-home', () => {
       updateLastThumb();
+      refreshLastImageFromDisk();
       startCamera();
     });
   },
@@ -466,18 +495,26 @@ const App = {
   // ── Last image ────────────────────────────────────────────────────────────
   goLastImage() {
     stopCamera();
-    showScreen('screen-image', () => {
+    showScreen('screen-image', async () => {
       const content = document.getElementById('image-content');
+      content.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-sub)">Memuat foto terakhir...</div>`;
+      await refreshLastImageFromDisk();
       if (!state.lastImageB64) {
         content.innerHTML = `<div style="text-align:center; padding:40px; color:var(--text-sub); font-size:14px">
           Belum ada foto.<br>Lakukan Capture terlebih dahulu.</div>`;
         return;
       }
+      const meta = state.lastImageMeta ?? {};
+      const dims = meta.width && meta.height ? `${meta.width}x${meta.height}` : '-';
+      const filename = meta.filename ? esc(meta.filename) : 'Foto Terakhir';
       content.innerHTML = `
-        <div class="card" style="padding:8px; margin-bottom:8px">
+        <div class="last-image-view">
           <img src="data:image/jpeg;base64,${state.lastImageB64}" class="image-preview" alt="Last capture" />
         </div>
-        <div style="text-align:center; font-size:12px; color:var(--text-sub)">Foto Terakhir</div>`;
+        <div class="last-image-caption">
+          <span>${filename}</span>
+          <span>${dims}</span>
+        </div>`;
     });
   },
 
@@ -769,12 +806,44 @@ function classifyBilirubin(value) {
   return RISK_BANDS.find(band => value >= band.min) ?? RISK_BANDS[RISK_BANDS.length - 1];
 }
 
+function capturedImageHtml(imageB64) {
+  if (!imageB64) {
+    return `<div class="capture-image-empty">Foto tidak tersedia</div>`;
+  }
+  return `<img src="data:image/jpeg;base64,${imageB64}" class="capture-result-image" alt="Foto hasil capture" />`;
+}
+
+function compactInfoRows(rows) {
+  return rows
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([label, value]) => infoRow(label, value))
+    .join('');
+}
+
+function compactGateList(errors) {
+  const visible = errors.slice(0, 3);
+  const hiddenCount = Math.max(0, errors.length - visible.length);
+  const extra = hiddenCount ? `<li>+${hiddenCount} catatan lain</li>` : '';
+  return `<ul class="gate-list compact">${visible.map(e => `<li>${esc(e)}</li>`).join('')}${extra}</ul>`;
+}
+
 function renderCaptureResult(result) {
   const content = document.getElementById('capture-content');
   if (result?.image_b64) {
-    state.lastImageB64 = result.image_b64;
-    updateLastThumb();
+    setLastImageFromPayload(result);
   }
+  const imageB64 = result?.image_b64 || state.lastImageB64;
+  const ts = result?.timestamp ? result.timestamp.slice(0, 19).replace('T', '  ') : '-';
+  const qual = result?.quality_label != null
+    ? `${String(result.quality_label).toUpperCase()} (${result.quality_score ?? 0}/100)`
+    : '-';
+  const mode = result?.preprocessing_mode ?? '-';
+  const palette = result?.palette_detected ? 'Terdeteksi' : 'Tidak terdeteksi';
+  const inference = `${result?.model_backend ?? '?'} / ${modelModeLabel(result?.model_mode || result?.model_used)}`;
+  const latency = result?.inference_time_ms != null ? `${Number(result.inference_time_ms).toFixed(1)} ms` : '-';
+  const attempt = result?.capture_attempts
+    ? `${result.capture_attempt ?? 1}/${result.capture_attempts}`
+    : null;
 
   if (!result || !result.success) {
     const errMsg = result?.error ?? 'Error tidak diketahui';
@@ -785,17 +854,32 @@ function renderCaptureResult(result) {
       ? 'Pastikan kartu kalibrasi, color palette, dan area kulit terlihat jelas.'
       : 'Periksa status kamera dan model, lalu coba capture ulang.';
     const detail = gateErrors.length
-      ? `<ul class="gate-list">${gateErrors.map(e => `<li>${esc(e)}</li>`).join('')}</ul>`
-      : `<div style="font-size:13px">${esc(errMsg)}</div>`;
+      ? compactGateList(gateErrors)
+      : `<div class="result-compact-text">${esc(errMsg)}</div>`;
     const warnings = gateWarnings.length
-      ? `<div class="gate-warn">${gateWarnings.map(esc).join('<br>')}</div>`
+      ? `<div class="gate-warn">${gateWarnings.slice(0, 2).map(esc).join('<br>')}</div>`
       : '';
     content.innerHTML = `
-      <div class="result-card sev-err" style="padding:16px 20px">
-        <div style="font-size:18px; font-weight:700; margin-bottom:8px">${title}</div>
-        ${detail}
-        ${warnings}
-        <div style="font-size:12px; margin-top:10px">${helper}</div>
+      <div class="capture-result-layout">
+        <div class="capture-image-pane">${capturedImageHtml(imageB64)}</div>
+        <div class="capture-summary-pane">
+          <div class="result-card compact sev-err">
+            <div class="result-status">Gagal</div>
+            <div class="result-title">${title}</div>
+            ${detail}
+            ${warnings}
+            <div class="result-helper">${helper}</div>
+          </div>
+          <div class="card result-detail-card">
+            ${compactInfoRows([
+              ['Waktu', ts],
+              ['Kualitas', qual],
+              ['Palette', palette],
+              ['Mode', mode],
+              ['Percobaan', attempt],
+            ])}
+          </div>
+        </div>
       </div>`;
     return;
   }
@@ -803,22 +887,21 @@ function renderCaptureResult(result) {
   const bili = Number.parseFloat(result.bilirubin_prediction);
   if (!Number.isFinite(bili)) {
     content.innerHTML = `
-      <div class="result-card sev-err" style="padding:16px 20px">
-        <div style="font-size:18px; font-weight:700; margin-bottom:8px">Prediksi Gagal</div>
-        <div style="font-size:13px">Nilai bilirubin dari server tidak valid.</div>
+      <div class="capture-result-layout">
+        <div class="capture-image-pane">${capturedImageHtml(imageB64)}</div>
+        <div class="capture-summary-pane">
+          <div class="result-card compact sev-err">
+            <div class="result-status">Gagal</div>
+            <div class="result-title">Prediksi Gagal</div>
+            <div class="result-compact-text">Nilai bilirubin dari server tidak valid.</div>
+          </div>
+        </div>
       </div>`;
     return;
   }
   const risk = classifyBilirubin(bili);
   const sevClass = risk.className;
   const level = risk.label;
-
-  const ts   = result.timestamp ? result.timestamp.slice(0, 19).replace('T', '  ') : '-';
-  const qual = `${String(result.quality_label ?? '?').toUpperCase()}  (${result.quality_score ?? 0}/100)`;
-  const mode = result.preprocessing_mode ?? '?';
-  const palette = result.palette_detected ? 'Terdeteksi' : 'Tidak terdeteksi';
-  const inference = `${result.model_backend ?? '?'} / ${modelModeLabel(result.model_mode || result.model_used)}`;
-  const latency = result.inference_time_ms != null ? `${Number(result.inference_time_ms).toFixed(1)} ms` : '-';
 
   const rawAlignedReason = result.palette_detected
     ? 'mode raw_aligned - koreksi warna tidak diterapkan karena kualitas kalibrasi belum cukup stabil'
@@ -831,22 +914,28 @@ function renderCaptureResult(result) {
     : '';
 
   content.innerHTML = `
-    <div class="result-card ${sevClass}">
-      <div class="result-num">${bili.toFixed(2)}</div>
-      <div class="result-unit">mg/dL</div>
-      <hr class="result-hr" style="background:currentColor">
-      <div class="result-level">${level}</div>
-    </div>
-    <div class="result-clinical-note">Skrining awal. Interpretasi klinis tetap perlu mempertimbangkan usia bayi dalam jam, berat badan, prematuritas, dan pemeriksaan tenaga kesehatan.</div>
-    ${rawAlignedBanner}
-    ${logWarnBanner}
-    <div class="card">
-      ${infoRow('Waktu',    ts)}
-      ${infoRow('Kualitas', qual)}
-      ${infoRow('Palette',  palette)}
-      ${infoRow('Mode',     mode)}
-      ${infoRow('Inferensi', inference)}
-      ${infoRow('Latency',  latency)}
+    <div class="capture-result-layout">
+      <div class="capture-image-pane">${capturedImageHtml(imageB64)}</div>
+      <div class="capture-summary-pane">
+        <div class="result-card compact ${sevClass}">
+          <div class="result-status">Berhasil</div>
+          <div class="result-num">${bili.toFixed(2)}</div>
+          <div class="result-unit">mg/dL</div>
+          <div class="result-level">${level}</div>
+        </div>
+        ${rawAlignedBanner}
+        ${logWarnBanner}
+        <div class="card result-detail-card">
+          ${compactInfoRows([
+            ['Waktu', ts],
+            ['Kualitas', qual],
+            ['Palette', palette],
+            ['Mode', mode],
+            ['Inferensi', inference],
+            ['Latency', latency],
+          ])}
+        </div>
+      </div>
     </div>`;
 
   state.lastPrediction = bili;
