@@ -34,6 +34,10 @@ const state = {
   nativeDisplayMetrics: null,
   gpioAvailable: false,  // true when RPi GPIO is active
   gpioReady: true,       // false = waiting for limit switch to return HIGH
+  babies: [],
+  activeBaby: null,
+  activeBabyId: null,
+  syncStatus: null,
 };
 
 // ── Runtime viewport measurement ─────────────────────────────────────────
@@ -230,6 +234,84 @@ async function refreshLastImageFromDisk() {
   return false;
 }
 
+function setBabyState(payload) {
+  if (!payload) return;
+  if (Array.isArray(payload.babies)) {
+    state.babies = payload.babies;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'active_baby')) {
+    state.activeBaby = payload.active_baby;
+  } else if (Object.prototype.hasOwnProperty.call(payload, 'activeBaby')) {
+    state.activeBaby = payload.activeBaby;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'active_baby_id')) {
+    state.activeBabyId = payload.active_baby_id;
+  } else {
+    state.activeBabyId = state.activeBaby?.baby_id ?? null;
+  }
+  if (!state.activeBaby && state.activeBabyId != null) {
+    state.activeBaby = state.babies.find(b => Number(b.baby_id) === Number(state.activeBabyId)) ?? null;
+  }
+  updateBabyUi();
+}
+
+function setSyncState(payload) {
+  if (!payload) return;
+  state.syncStatus = payload;
+  updateSyncUi();
+}
+
+function updateBabyUi() {
+  const nameEl = document.getElementById('active-baby-name');
+  const chip = document.getElementById('baby-select-btn');
+  const name = state.activeBaby?.baby_name;
+  if (nameEl) nameEl.textContent = name || 'Pilih profil bayi';
+  if (chip) chip.classList.toggle('is-missing', !state.activeBaby || Number(state.activeBaby?.is_archived || 0) === 1);
+  updateCaptureButton();
+}
+
+function syncStatusLabel(status) {
+  if (!status?.configured) return 'Offline';
+  if (status.failed_count > 0 || status.last_error) return 'Sync error';
+  if ((status.pending ?? 0) > 0) return `Pending ${status.pending}`;
+  return 'Synced';
+}
+
+function updateSyncUi() {
+  const el = document.getElementById('sync-chip');
+  if (!el) return;
+  const label = syncStatusLabel(state.syncStatus);
+  el.textContent = label;
+  el.classList.remove('sync-offline', 'sync-pending', 'sync-error', 'sync-ok');
+  if (label === 'Synced') el.classList.add('sync-ok');
+  else if (label.startsWith('Pending')) el.classList.add('sync-pending');
+  else if (label === 'Sync error') el.classList.add('sync-error');
+  else el.classList.add('sync-offline');
+}
+
+async function loadBabies() {
+  try {
+    const payload = await apiGet('/api/babies');
+    if (payload?.success) setBabyState(payload);
+    return payload;
+  } catch {
+    updateBabyUi();
+    return null;
+  }
+}
+
+async function loadSyncStatus() {
+  try {
+    const payload = await apiGet('/api/sync/status');
+    setSyncState(payload);
+    setBabyState(payload);
+    return payload;
+  } catch {
+    setSyncState({ configured: false, pending: 0, last_error: 'backend offline' });
+    return null;
+  }
+}
+
 function resolutionValue(res) {
   if (!res) return '';
   const width = Array.isArray(res) ? res[0] : res.width;
@@ -292,7 +374,9 @@ function updateCaptureButton() {
   const btn = document.getElementById('btn-capture');
   if (!btn) return;
   const gpioBlocked = state.gpioAvailable && !state.gpioReady;
-  btn.disabled = gpioBlocked || state.isCapturing;
+  const babyUnavailable = !state.activeBaby || Number(state.activeBaby?.is_archived || 0) === 1;
+  btn.disabled = gpioBlocked || state.isCapturing || babyUnavailable;
+  btn.title = babyUnavailable ? 'Pilih profil bayi aktif terlebih dahulu' : '';
 }
 
 function startCamera() {
@@ -406,6 +490,9 @@ const App = {
   goHome() {
     showScreen('screen-home', () => {
       updateLastThumb();
+      updateBabyUi();
+      loadBabies();
+      loadSyncStatus();
       refreshLastImageFromDisk();
       startCamera();
     });
@@ -420,6 +507,11 @@ const App = {
   // ── Capture ─────────────────────────────────────────────────────────────
   async startCapture() {
     if (state.isCapturing) return;
+    if (!state.activeBaby || Number(state.activeBaby?.is_archived || 0) === 1) {
+      toast('Pilih profil bayi aktif terlebih dahulu');
+      this.goBabies();
+      return;
+    }
     if (state.gpioAvailable && !state.gpioReady) {
       toast('Sensor belum siap — tunggu limit switch kembali ke posisi awal');
       return;
@@ -440,6 +532,7 @@ const App = {
     try {
       const result = await apiPost('/api/capture');
       renderCaptureResult(result);
+      loadSyncStatus();
     } catch (e) {
       content.innerHTML = `
         <div class="result-card sev-err" style="padding:20px">
@@ -455,13 +548,79 @@ const App = {
     }
   },
 
+  // ── Baby profiles ───────────────────────────────────────────────────────
+  async goBabies() {
+    stopCamera();
+    showScreen('screen-babies', async () => {
+      await loadBabies();
+      await loadSyncStatus();
+      renderBabiesScreen();
+    });
+  },
+
+  async refreshBabies() {
+    const content = document.getElementById('babies-content');
+    if (content) content.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-sub)">Memuat profil dari Supabase...</div>`;
+    try {
+      const payload = await apiPost('/api/babies/refresh');
+      setBabyState(payload);
+      setSyncState(await apiGet('/api/sync/status'));
+      renderBabiesScreen();
+      toast(payload?.success ? 'Profil bayi diperbarui' : (payload?.error || 'Refresh gagal'));
+    } catch {
+      await loadBabies();
+      renderBabiesScreen();
+      toast('Refresh gagal, memakai cache lokal');
+    }
+  },
+
+  async selectBaby(babyId) {
+    try {
+      const payload = await apiPut('/api/babies/active', { baby_id: Number(babyId) });
+      if (payload?.success) {
+        setBabyState(payload);
+        renderBabiesScreen();
+        toast(`Bayi aktif: ${payload.active_baby?.baby_name ?? babyId}`);
+      } else {
+        toast(payload?.error || payload?.detail || 'Gagal memilih bayi');
+      }
+    } catch (err) {
+      toast(err?.message || 'Gagal memilih bayi');
+    }
+  },
+
+  async runSync() {
+    setSyncState({ ...(state.syncStatus || {}), configured: state.syncStatus?.configured, pending: state.syncStatus?.pending ?? 0, last_error: null });
+    try {
+      const payload = await apiPost('/api/sync/run');
+      setSyncState(payload);
+      setBabyState(payload);
+      await loadBabies();
+      if (state.currentScreen === 'screen-babies') renderBabiesScreen();
+      toast(payload?.success ? syncStatusLabel(payload) : (payload?.error || 'Sync gagal'));
+    } catch {
+      setSyncState({ configured: false, pending: state.syncStatus?.pending ?? 0, last_error: 'backend offline' });
+      toast('Sync gagal');
+    }
+  },
+
   // ── History ──────────────────────────────────────────────────────────────
   async goHistory() {
     showScreen('screen-history', async () => {
+      await loadBabies();
+      const active = state.activeBaby;
+      const query = active ? `baby_id=${encodeURIComponent(active.baby_id)}` : 'all=true';
       const [histRes, statsRes] = await Promise.all([
-        apiGet('/api/history?limit=10'),
-        apiGet('/api/stats'),
+        apiGet(`/api/history?limit=10&${query}`),
+        apiGet(`/api/stats?${query}`),
       ]);
+
+      const filterEl = document.getElementById('history-filter');
+      if (filterEl) {
+        filterEl.textContent = active
+          ? `Profil aktif: ${active.baby_name} (ID ${active.baby_id})`
+          : 'Semua data lokal - belum ada bayi aktif';
+      }
 
       // Stats bar
       const stats = statsRes || {};
@@ -481,7 +640,7 @@ const App = {
         return;
       }
       const header = `${'#'.padEnd(3)} ${'Waktu'.padEnd(19)} ${'mg/dL'.padEnd(7)} ${'Kualitas'.padEnd(8)} Mode\n${'─'.repeat(56)}\n`;
-      const rows = [...records].reverse().slice(0, 10).map((r, i) => {
+      const rows = records.slice(0, 10).map((r, i) => {
         const ts   = String(r.timestamp ?? 'N/A').slice(0, 19).replace('T', ' ');
         const bili = r.bilirubin_prediction != null ? parseFloat(r.bilirubin_prediction).toFixed(2) : 'N/A';
         const q    = String(r.quality_label ?? 'N/A');
@@ -827,6 +986,50 @@ function compactGateList(errors) {
   return `<ul class="gate-list compact">${visible.map(e => `<li>${esc(e)}</li>`).join('')}${extra}</ul>`;
 }
 
+function formatBabyDob(value) {
+  if (!value) return '-';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).slice(0, 16).replace('T', ' ');
+  return d.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function renderBabiesScreen() {
+  const content = document.getElementById('babies-content');
+  if (!content) return;
+  const babies = state.babies || [];
+  const sync = state.syncStatus || {};
+  const activeId = state.activeBaby?.baby_id ?? state.activeBabyId;
+  const syncLine = `${syncStatusLabel(sync)}${sync.last_error ? ` - ${esc(sync.last_error)}` : ''}`;
+
+  const rows = babies.map(baby => {
+    const isActive = Number(baby.baby_id) === Number(activeId);
+    const archived = Number(baby.is_archived || 0) === 1;
+    return `
+      <button class="baby-row ${isActive ? 'is-active' : ''}" ${archived ? 'disabled' : ''} onclick="App.selectBaby(${Number(baby.baby_id)})">
+        <div class="baby-row-main">
+          <div class="baby-row-name">${esc(baby.baby_name)}</div>
+          <div class="baby-row-meta">ID ${esc(baby.baby_id)} · Lahir ${esc(formatBabyDob(baby.baby_dob))}</div>
+        </div>
+        <div class="baby-row-status">${archived ? 'Archived' : isActive ? 'Aktif' : 'Pilih'}</div>
+      </button>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="sync-panel">
+      <div>
+        <div class="sync-panel-title">Status Sync</div>
+        <div class="sync-panel-sub">${syncLine}</div>
+      </div>
+      <div class="sync-panel-actions">
+        <button class="btn btn-secondary" onclick="App.refreshBabies()">Refresh</button>
+        <button class="btn btn-primary" onclick="App.runSync()">Sync</button>
+      </div>
+    </div>
+    <div class="baby-list">
+      ${rows || '<div class="empty-state">Belum ada profil bayi di cache lokal. Tekan Refresh saat Raspi online.</div>'}
+    </div>`;
+}
+
 function renderCaptureResult(result) {
   const content = document.getElementById('capture-content');
   if (result?.image_b64) {
@@ -844,6 +1047,9 @@ function renderCaptureResult(result) {
   const attempt = result?.capture_attempts
     ? `${result.capture_attempt ?? 1}/${result.capture_attempts}`
     : null;
+  const babyName = result?.baby_name || state.activeBaby?.baby_name || null;
+  const ageHours = result?.age_hours != null ? `${Number(result.age_hours).toFixed(1)} jam` : null;
+  const syncInfo = result?.sync_status ? String(result.sync_status) : null;
 
   if (!result || !result.success) {
     const errMsg = result?.error ?? 'Error tidak diketahui';
@@ -872,11 +1078,14 @@ function renderCaptureResult(result) {
           </div>
           <div class="card result-detail-card">
             ${compactInfoRows([
+              ['Bayi', babyName],
               ['Waktu', ts],
+              ['Usia', ageHours],
               ['Kualitas', qual],
               ['Palette', palette],
               ['Mode', mode],
               ['Percobaan', attempt],
+              ['Sync', syncInfo],
             ])}
           </div>
         </div>
@@ -912,6 +1121,9 @@ function renderCaptureResult(result) {
   const logWarnBanner = result.log_warning
     ? `<div class="result-mode-warn">Peringatan: ${esc(result.log_warning)}</div>`
     : '';
+  const offlineWarnBanner = result.offline_warning
+    ? `<div class="result-mode-warn">Peringatan: ${esc(result.offline_warning)}</div>`
+    : '';
 
   content.innerHTML = `
     <div class="capture-result-layout">
@@ -925,14 +1137,18 @@ function renderCaptureResult(result) {
         </div>
         ${rawAlignedBanner}
         ${logWarnBanner}
+        ${offlineWarnBanner}
         <div class="card result-detail-card">
           ${compactInfoRows([
+            ['Bayi', babyName],
             ['Waktu', ts],
+            ['Usia', ageHours],
             ['Kualitas', qual],
             ['Palette', palette],
             ['Mode', mode],
             ['Inferensi', inference],
             ['Latency', latency],
+            ['Sync', syncInfo],
           ])}
         </div>
       </div>
@@ -967,6 +1183,8 @@ async function waitForServer() {
           }
         }
         statusEl.textContent = '✓ Terhubung!';
+        await loadBabies();
+        await loadSyncStatus();
         await new Promise(r => setTimeout(r, 400));
         App.goHome();
         return;

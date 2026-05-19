@@ -168,6 +168,7 @@ def _normalize_model_mode(value: str | None, default: str = "stage2") -> str:
 # ===== PATHS =====
 LOGS_DIR = PROJECT_ROOT / "logs"
 IMAGES_DIR = PROJECT_ROOT / "data" / "captures"
+OFFLINE_SYNC_DB_PATH = PROJECT_ROOT / "data" / "offline_sync.db"
 MODELS_DIR = PROJECT_ROOT
 
 # ===== DEVICE PROFILE =====
@@ -226,6 +227,16 @@ PREPROCESSING_CHECKERBOARD_SIDE = "top"
 USE_CSV_LOGGING = True
 USE_SQLITE_LOGGING = False
 LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR
+
+# ===== OFFLINE-FIRST SUPABASE SYNC =====
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+BILIRUBIN_DEVICE_ID = os.getenv("BILIRUBIN_DEVICE_ID", "").strip()
+BILIRUBIN_DEVICE_NAME = os.getenv("BILIRUBIN_DEVICE_NAME", "").strip()
+BILIRUBIN_HOSPITAL_ID = os.getenv("BILIRUBIN_HOSPITAL_ID", "").strip()
+BILIRUBIN_SUPABASE_BUCKET = os.getenv("BILIRUBIN_SUPABASE_BUCKET", "measurement-images").strip() or "measurement-images"
+BILIRUBIN_IMAGE_ENCRYPTION_KEY = os.getenv("BILIRUBIN_IMAGE_ENCRYPTION_KEY", "").strip()
+BILIRUBIN_SYNC_INTERVAL_SECONDS = _env_int("BILIRUBIN_SYNC_INTERVAL_SECONDS", 60)
 
 # ===== UI CONFIGURATION =====
 UI_WINDOW_WIDTH = 800

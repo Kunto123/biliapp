@@ -22,3 +22,6 @@ scipy>=1.13.0
 # API server
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
+
+# Offline-first sync image encryption
+cryptography>=42.0.0

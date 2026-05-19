@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 import time
 import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +25,7 @@ sys.path.insert(0, str(SRC_DIR))
 # BASE_DIR = bili-app/ (parent dari src-python/)
 BASE_DIR = SRC_DIR.parent
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -40,6 +42,12 @@ from camera_settings import (
 )
 from main_pipeline import BilirubinPredictionPipeline
 from config import (
+    BILIRUBIN_DEVICE_ID,
+    BILIRUBIN_DEVICE_NAME,
+    BILIRUBIN_HOSPITAL_ID,
+    BILIRUBIN_IMAGE_ENCRYPTION_KEY,
+    BILIRUBIN_SUPABASE_BUCKET,
+    BILIRUBIN_SYNC_INTERVAL_SECONDS,
     DEVICE_PROFILE,
     CAMERA_CAPTURE_IMMEDIATE,
     CAMERA_CAPTURE_RETRIES,
@@ -49,10 +57,15 @@ from config import (
     MODEL_MODE,
     MODEL_STAGE1_TFLITE_PATH,
     MODEL_STAGE2_TFLITE_PATH,
+    OFFLINE_SYNC_DB_PATH,
     PREVIEW_POLL_MS,
+    SUPABASE_KEY,
+    SUPABASE_URL,
     USE_STAGE2,
 )
 from gpio_manager import gpio_manager
+from offline_store import OfflineStore
+from supabase_sync import SupabaseSyncService, SyncConfig
 
 app = FastAPI(title="Bilirubin API", version="1.0.0")
 app.add_middleware(
@@ -65,6 +78,8 @@ app.add_middleware(
 PORT = 7878
 
 pipeline: Optional[BilirubinPredictionPipeline] = None
+offline_store: Optional[OfflineStore] = None
+sync_service: Optional[SupabaseSyncService] = None
 preview_cache_b64: Optional[str] = None
 preview_cache_at: float = 0.0
 preview_focus_score: Optional[float] = None
@@ -265,15 +280,123 @@ def _reset_camera_if_needed(force: bool = False) -> bool:
         return False
 
 
+def _parse_datetime(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _to_utc_iso(value) -> str:
+    dt = _parse_datetime(value) or datetime.now()
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _age_hours(baby: dict, captured_at: str) -> Optional[float]:
+    dob = _parse_datetime(baby.get("baby_dob"))
+    captured = _parse_datetime(captured_at)
+    if dob is None or captured is None:
+        return None
+    if dob.tzinfo is None:
+        dob = dob.astimezone()
+    if captured.tzinfo is None:
+        captured = captured.astimezone()
+    hours = (captured.astimezone(timezone.utc) - dob.astimezone(timezone.utc)).total_seconds() / 3600.0
+    return round(hours, 3) if hours >= 0 else None
+
+
+def _result_model_version(result: dict) -> str:
+    backend = result.get("model_backend") or MODEL_BACKEND
+    mode = result.get("model_mode") or result.get("model_used") or MODEL_MODE
+    return f"bilirubin_v1_{backend}_{mode}"
+
+
+def _active_baby_payload() -> dict:
+    if offline_store is None:
+        return {"active_baby_id": None, "active_baby": None}
+    baby = offline_store.get_active_baby()
+    return {
+        "active_baby_id": baby.get("baby_id") if baby else None,
+        "active_baby": baby,
+    }
+
+
+def _enqueue_capture_result(result: dict, baby: dict) -> None:
+    if offline_store is None:
+        return
+
+    captured_at = _to_utc_iso(result.get("timestamp"))
+    success = bool(result.get("success"))
+    measurement = {
+        "measurement_id": str(uuid.uuid4()),
+        "baby_id": baby.get("baby_id"),
+        "captured_at": captured_at,
+        "age_hours": _age_hours(baby, captured_at),
+        "bilirubin_mgdl": result.get("bilirubin_prediction") if success else None,
+        "has_image": bool(result.get("image_path")),
+        "device_id": sync_service.device_id if sync_service is not None else offline_store.get_device_id(BILIRUBIN_DEVICE_ID),
+        "model_version": _result_model_version(result),
+        "image_path": result.get("image_path"),
+        "preprocessing_mode": result.get("preprocessing_mode"),
+        "quality_label": result.get("quality_label"),
+        "quality_score": result.get("quality_score"),
+        "palette_detected": bool(result.get("palette_detected")),
+        "success": success,
+        "error_message": result.get("error") if not success else None,
+        "sync_status": "pending" if success else "local_only",
+    }
+    measurement_id = offline_store.enqueue_measurement(measurement)
+    result["measurement_id"] = measurement_id
+    result["sync_status"] = measurement["sync_status"]
+    result["baby_id"] = baby.get("baby_id")
+    result["baby_name"] = baby.get("baby_name")
+    result["age_hours"] = measurement["age_hours"]
+
+    if success and sync_service is not None and sync_service.configured:
+        threading.Thread(target=sync_service.sync_once, name="sync-after-capture", daemon=True).start()
+
+
 @app.on_event("startup")
 async def startup():
-    global pipeline
+    global pipeline, offline_store, sync_service
     m1 = BASE_DIR / "best_model_stage1.keras"
     m2 = BASE_DIR / "best_model_stage2.keras"
     stage2_available = m2.exists() or MODEL_STAGE2_TFLITE_PATH.exists()
     print(f"[api] BASE_DIR : {BASE_DIR}")
     print(f"[api] Stage1   : {m1} (exists={m1.exists()})")
     print(f"[api] Stage2   : {m2} (keras={m2.exists()}, tflite={MODEL_STAGE2_TFLITE_PATH.exists()})")
+    try:
+        offline_store = OfflineStore(OFFLINE_SYNC_DB_PATH)
+        sync_service = SupabaseSyncService(
+            offline_store,
+            SyncConfig(
+                supabase_url=SUPABASE_URL,
+                supabase_key=SUPABASE_KEY,
+                device_id=BILIRUBIN_DEVICE_ID,
+                device_name=BILIRUBIN_DEVICE_NAME,
+                hospital_id=BILIRUBIN_HOSPITAL_ID,
+                storage_bucket=BILIRUBIN_SUPABASE_BUCKET,
+                image_encryption_key=BILIRUBIN_IMAGE_ENCRYPTION_KEY,
+                interval_seconds=BILIRUBIN_SYNC_INTERVAL_SECONDS,
+            ),
+        )
+        sync_service.start()
+        print(f"[api] Offline store: {OFFLINE_SYNC_DB_PATH}")
+        print(f"[api] Sync configured: {sync_service.configured}")
+    except Exception as e:
+        print(f"[api] Offline sync init failed: {e}")
+
     try:
         pipeline = BilirubinPredictionPipeline(
             model_stage1_path=str(m1),
@@ -299,6 +422,10 @@ async def shutdown():
         _stop_preview_stream()
         if pipeline:
             pipeline.cleanup()
+    if sync_service is not None:
+        sync_service.stop()
+    if offline_store is not None:
+        offline_store.close()
     gpio_manager.stop()
 
 
@@ -336,6 +463,12 @@ async def get_status():
         "configured_model_mode": MODEL_MODE,
         "model_mode": status.get("models", {}).get("model_mode", MODEL_MODE),
         "use_stage2": status.get("models", {}).get("using_stage2", USE_STAGE2),
+    }
+    status["baby_profile"] = _active_baby_payload()
+    status["sync"] = sync_service.status() if sync_service is not None else {
+        "configured": False,
+        "pending": 0,
+        "last_error": "Offline store belum diinisialisasi",
     }
     # Pastikan serializable
     for k, v in list(status.items()):
@@ -578,12 +711,26 @@ async def reconnect_camera():
 
 # ── Prediction ────────────────────────────────────────────────────────────────
 
-async def _execute_capture() -> dict:
+async def _execute_capture(active_baby: Optional[dict] = None) -> dict:
     """Core capture+predict logic. Flash dikontrol langsung oleh switch di gpio_manager."""
     global capture_in_progress, preview_stream
 
     if capture_in_progress:
         return {"success": False, "error": "Capture sedang berlangsung", "busy": True}
+    if active_baby is None:
+        active_baby = offline_store.get_active_baby() if offline_store is not None else None
+    if active_baby is None:
+        return {
+            "success": False,
+            "error": "Pilih profil bayi terlebih dahulu",
+            "baby_required": True,
+        }
+    if int(active_baby.get("is_archived") or 0):
+        return {
+            "success": False,
+            "error": "Profil bayi aktif sudah diarsipkan. Pilih profil lain.",
+            "baby_required": True,
+        }
     capture_in_progress = True
 
     try:
@@ -596,7 +743,7 @@ async def _execute_capture() -> dict:
             try:
                 prediction, result = pipeline.capture_and_predict()
                 if result.get("timestamp"):
-                    result["timestamp"] = result["timestamp"].isoformat()
+                    result["timestamp"] = _to_utc_iso(result["timestamp"])
 
                 if result.get("image_path") and Path(result["image_path"]).exists():
                     img = cv2.imread(result["image_path"])
@@ -604,6 +751,11 @@ async def _execute_capture() -> dict:
                         _update_preview_cache(img)
                         _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
                         result["image_b64"] = base64.b64encode(buf).decode()
+
+                try:
+                    _enqueue_capture_result(result, active_baby)
+                except Exception as exc:
+                    result["offline_warning"] = f"Gagal menyimpan antrean lokal: {exc}"
 
                 if not result.get("success"):
                     error_text = str(result.get("error") or "").lower()
@@ -628,6 +780,22 @@ async def _execute_capture() -> dict:
 async def capture_and_predict():
     if pipeline is None:
         return {"success": False, "error": "Pipeline tidak diinisialisasi"}
+    if offline_store is None:
+        return {"success": False, "error": "Offline store belum diinisialisasi"}
+
+    active_baby = offline_store.get_active_baby()
+    if active_baby is None:
+        return {
+            "success": False,
+            "error": "Pilih profil bayi terlebih dahulu",
+            "baby_required": True,
+        }
+    if int(active_baby.get("is_archived") or 0):
+        return {
+            "success": False,
+            "error": "Profil bayi aktif sudah diarsipkan. Pilih profil lain.",
+            "baby_required": True,
+        }
 
     # Consume any GPIO trigger flag set by the limit switch monitor
     gpio_manager.consume_trigger()
@@ -640,7 +808,72 @@ async def capture_and_predict():
             "gpio_blocked": True,
         }
 
-    return await _execute_capture()
+    return await _execute_capture(active_baby)
+
+
+# ── Babies & Sync ────────────────────────────────────────────────────────────
+
+class ActiveBabyPayload(BaseModel):
+    baby_id: int
+
+
+@app.get("/api/babies")
+async def get_babies(include_archived: bool = True):
+    if offline_store is None:
+        return {"success": False, "babies": [], "error": "Offline store belum diinisialisasi"}
+    return {
+        "success": True,
+        "babies": offline_store.list_babies(include_archived=include_archived),
+        **_active_baby_payload(),
+    }
+
+
+@app.post("/api/babies/refresh")
+async def refresh_babies():
+    if offline_store is None:
+        return {"success": False, "babies": [], "error": "Offline store belum diinisialisasi"}
+    if sync_service is None:
+        return {"success": False, "babies": offline_store.list_babies(), "error": "Sync service belum siap"}
+    result = sync_service.refresh_babies()
+    result["babies"] = offline_store.list_babies()
+    result.update(_active_baby_payload())
+    return result
+
+
+@app.get("/api/babies/active")
+async def get_active_baby():
+    if offline_store is None:
+        return {"success": False, "active_baby": None, "error": "Offline store belum diinisialisasi"}
+    return {"success": True, **_active_baby_payload()}
+
+
+@app.put("/api/babies/active")
+async def set_active_baby(payload: ActiveBabyPayload):
+    if offline_store is None:
+        return {"success": False, "error": "Offline store belum diinisialisasi"}
+    try:
+        baby = offline_store.set_active_baby(payload.baby_id)
+        return {"success": True, "active_baby_id": baby["baby_id"], "active_baby": baby}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/sync/status")
+async def get_sync_status():
+    if sync_service is None:
+        return {"success": False, "configured": False, "pending": 0, "last_error": "Sync service belum siap"}
+    status = sync_service.status()
+    status.update(_active_baby_payload())
+    return status
+
+
+@app.post("/api/sync/run")
+async def run_sync():
+    if sync_service is None:
+        return {"success": False, "configured": False, "error": "Sync service belum siap"}
+    status = sync_service.sync_once(refresh_babies=True)
+    status.update(_active_baby_payload())
+    return status
 
 
 # ── GPIO ─────────────────────────────────────────────────────────────────────
@@ -653,7 +886,24 @@ async def get_gpio_status():
 # ── History & Stats ───────────────────────────────────────────────────────────
 
 @app.get("/api/history")
-async def get_history(limit: int = 10):
+async def get_history(
+    limit: int = 10,
+    baby_id: Optional[int] = None,
+    show_all: bool = Query(False, alias="all"),
+):
+    if offline_store is not None:
+        active_baby_id = offline_store.get_active_baby_id()
+        selected_baby_id = baby_id if baby_id is not None else active_baby_id
+        records = offline_store.list_measurements(
+            limit=limit,
+            baby_id=selected_baby_id,
+            include_all=show_all or selected_baby_id is None,
+        )
+        return {
+            "records": records,
+            "baby_id": selected_baby_id,
+            "all": show_all or selected_baby_id is None,
+        }
     if pipeline is None:
         return {"records": []}
     return {"records": pipeline.get_last_results(num=limit)}
@@ -709,7 +959,17 @@ async def get_latest_image():
 
 
 @app.get("/api/stats")
-async def get_stats():
+async def get_stats(
+    baby_id: Optional[int] = None,
+    show_all: bool = Query(False, alias="all"),
+):
+    if offline_store is not None:
+        active_baby_id = offline_store.get_active_baby_id()
+        selected_baby_id = baby_id if baby_id is not None else active_baby_id
+        return offline_store.get_measurement_stats(
+            baby_id=selected_baby_id,
+            include_all=show_all or selected_baby_id is None,
+        )
     if pipeline is None:
         return {"total_predictions": 0, "successful": 0, "failed": 0, "mean_bilirubin": None}
     stats = pipeline.get_statistics()

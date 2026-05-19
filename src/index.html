@@ -46,6 +46,14 @@
       <div id="camera-status" class="camera-status"></div>
     </div>
 
+    <div class="home-top-bar">
+      <button id="baby-select-btn" class="baby-chip" onclick="App.goBabies()">
+        <span class="baby-chip-label">Bayi</span>
+        <span id="active-baby-name">Pilih profil bayi</span>
+      </button>
+      <button id="sync-chip" class="sync-chip" onclick="App.runSync()">Offline</button>
+    </div>
+
     <div class="camera-controls">
       <button class="thumb-button" id="last-thumb" onclick="App.goLastImage()" aria-label="Lihat foto terakhir">
         <img id="last-thumb-img" class="thumb-img" alt="" />
@@ -86,6 +94,14 @@
     <div class="header-sub">Navigasi dan Pengaturan Sistem</div>
   </div>
   <div class="content">
+    <div class="menu-card" onclick="App.goBabies()">
+      <div class="menu-card-bar"></div>
+      <div class="menu-card-body">
+        <div class="menu-card-title">Profil Bayi</div>
+        <div class="menu-card-sub">Pilih profil bayi dan sinkronisasi cache</div>
+      </div>
+      <div class="menu-card-arrow">â¯</div>
+    </div>
     <div class="menu-card" onclick="App.goHistory()">
       <div class="menu-card-bar"></div>
       <div class="menu-card-body">
@@ -129,6 +145,19 @@
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════ -->
+<div id="screen-babies" class="screen">
+  <div class="header">
+    <div class="header-title">PROFIL BAYI</div>
+    <div class="header-sub">Profil dari Supabase, tersimpan sebagai cache lokal</div>
+  </div>
+  <div class="content" id="babies-content">
+    <!-- filled by JS -->
+  </div>
+  <div class="back-bar">
+    <button class="btn-back" onclick="App.goMenu()">â® Kembali</button>
+  </div>
+</div>
+
 <!--  RIWAYAT PREDIKSI                                                     -->
 <!-- ══════════════════════════════════════════════════════════════════════ -->
 <div id="screen-history" class="screen">
@@ -136,6 +165,7 @@
     <div class="header-title">RIWAYAT PREDIKSI</div>
     <div class="header-sub">10 Pemeriksaan Terakhir</div>
   </div>
+  <div id="history-filter" class="status-strip" style="margin:10px 14px 0"></div>
   <div id="history-stats" class="stats-bar" style="margin:10px 14px 0"></div>
   <div class="content" style="padding-top:8px">
     <div class="card" style="padding:10px 12px">

@@ -10,6 +10,8 @@ lerna-debug.log*
 # App runtime data
 data/captures/
 data/camera_settings.json
+data/offline_sync.db
+data/offline_sync.db-*
 
 # Local environment
 .env
