@@ -218,6 +218,14 @@
     <div class="header-sub">Konfigurasi Sistem</div>
   </div>
   <div class="content">
+    <div class="menu-card" onclick="App.goNetworkSettings()">
+      <div class="menu-card-bar"></div>
+      <div class="menu-card-body">
+        <div class="menu-card-title">Pengaturan Jaringan</div>
+        <div class="menu-card-sub">Hotspot, WiFi Client, dan status koneksi</div>
+      </div>
+      <div class="menu-card-arrow">❯</div>
+    </div>
     <div class="menu-card" onclick="App.goCameraConfig()">
       <div class="menu-card-bar"></div>
       <div class="menu-card-body">
@@ -250,6 +258,22 @@
   </div>
   <div class="back-bar">
     <button class="btn-back" onclick="App.goMenu()">❮ Kembali</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!--  PENGATURAN JARINGAN                                                 -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div id="screen-network" class="screen">
+  <div class="header">
+    <div class="header-title">PENGATURAN JARINGAN</div>
+    <div class="header-sub">Hotspot Lokal dan WiFi Client</div>
+  </div>
+  <div class="content" id="network-content">
+    <!-- filled by JS -->
+  </div>
+  <div class="back-bar">
+    <button class="btn-back" onclick="App.goSettings()">❮ Kembali</button>
   </div>
 </div>
 

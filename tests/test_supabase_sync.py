@@ -19,6 +19,7 @@ class FakeSupabaseClient:
         self.upserted_devices = []
         self.uploads = []
         self.fail_insert = False
+        self.online = True
 
     def fetch_babies(self):
         return [
@@ -43,6 +44,9 @@ class FakeSupabaseClient:
             raise RuntimeError("network error")
         self.inserted_measurements.append(payload)
 
+    def remote_reachable(self):
+        return self.online
+
 
 class SupabaseSyncTests(unittest.TestCase):
     def test_refresh_babies_and_sync_measurement(self):
@@ -58,6 +62,7 @@ class SupabaseSyncTests(unittest.TestCase):
                         supabase_key="key",
                         device_id="dev-1",
                         device_name="Device 1",
+                        hotspot_ssid="BiliApp-Local",
                         hospital_id="00000000-0000-0000-0000-000000000000",
                     ),
                 )
@@ -107,7 +112,7 @@ class SupabaseSyncTests(unittest.TestCase):
                         supabase_key="key",
                         device_id="dev-1",
                         device_name="Device 1",
-                        hospital_id="should-not-be-sent",
+                        hotspot_ssid="BiliApp-Local",
                         sync_device_registry=True,
                     ),
                 )
@@ -117,8 +122,54 @@ class SupabaseSyncTests(unittest.TestCase):
                 service.sync_once()
 
                 self.assertEqual(len(fake.upserted_devices), 1)
-                self.assertNotIn("hospital_id", fake.upserted_devices[0])
-                self.assertFalse(fake.upserted_devices[0]["is_paired"])
+                self.assertEqual(
+                    fake.upserted_devices[0],
+                    {
+                        "device_id": "dev-1",
+                        "display_name": "Device 1",
+                        "ssid": "BiliApp-Local",
+                    },
+                )
+            finally:
+                store.close()
+
+    def test_sync_skips_when_remote_is_unreachable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OfflineStore(Path(tmp) / "offline_sync.db")
+            try:
+                service = SupabaseSyncService(
+                    store,
+                    SyncConfig(
+                        supabase_url="https://example.supabase.co",
+                        supabase_key="key",
+                        device_id="dev-1",
+                        hotspot_ssid="BiliApp-Local",
+                    ),
+                )
+                fake = FakeSupabaseClient()
+                fake.online = False
+                service.client = fake
+
+                store.enqueue_measurement({
+                    "measurement_id": "m-offline",
+                    "baby_id": 7,
+                    "captured_at": "2026-05-19T01:00:00+00:00",
+                    "bilirubin_mgdl": 9.1,
+                    "has_image": False,
+                    "device_id": "dev-1",
+                    "success": True,
+                })
+
+                status = service.sync_once()
+
+                self.assertTrue(status["success"])
+                self.assertTrue(status.get("skipped"))
+                self.assertEqual(status.get("skip_reason"), "internet_unavailable")
+                counts = store.get_sync_counts()
+                self.assertEqual(counts["pending"], 1)
+                self.assertEqual(counts["failed"], 0)
+                self.assertEqual(counts["synced"], 0)
+                self.assertEqual(fake.inserted_measurements, [])
             finally:
                 store.close()
 

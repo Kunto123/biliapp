@@ -9,6 +9,7 @@ as regular JPEG files so Supabase Storage can preview them directly.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 import urllib.error
@@ -34,6 +35,20 @@ class SupabaseClient:
     @property
     def configured(self) -> bool:
         return bool(self.url and self.key)
+
+    def remote_reachable(self, timeout_seconds: float = 1.5) -> bool:
+        if not self.configured:
+            return False
+        parsed = urllib.parse.urlparse(self.url)
+        host = parsed.hostname
+        if not host:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            with socket.create_connection((host, port), timeout=timeout_seconds):
+                return True
+        except OSError:
+            return False
 
     def _headers(self, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
         headers = {
@@ -157,6 +172,7 @@ class SyncConfig:
     device_id: str = ""
     device_name: str = ""
     hospital_id: str = ""
+    hotspot_ssid: str = ""
     storage_bucket: str = "measurement-images"
     interval_seconds: int = 60
     sync_device_registry: bool = False
@@ -178,6 +194,12 @@ class SupabaseSyncService:
     @property
     def configured(self) -> bool:
         return self.client.configured
+
+    def _remote_reachable(self) -> bool:
+        checker = getattr(self.client, "remote_reachable", None)
+        if callable(checker):
+            return bool(checker())
+        return True
 
     def start(self) -> None:
         if self._thread is not None or self.config.interval_seconds <= 0:
@@ -206,6 +228,15 @@ class SupabaseSyncService:
             self.store.set_state("last_sync_error", self.last_error)
             return {"success": False, "error": self.last_error, "count": 0}
 
+        if not self._remote_reachable():
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "internet_unavailable",
+                "count": 0,
+                "babies": self.store.list_babies(),
+            }
+
         try:
             babies = self.client.fetch_babies()
             count = self.store.upsert_babies(babies)
@@ -224,6 +255,13 @@ class SupabaseSyncService:
             self.last_error = "Supabase belum dikonfigurasi"
             self.store.set_state("last_sync_error", self.last_error)
             return self.status(success=False, error=self.last_error)
+
+        if not self._remote_reachable():
+            status = self.status(success=True)
+            status["skipped"] = True
+            status["skip_reason"] = "internet_unavailable"
+            status["synced_this_run"] = 0
+            return status
 
         if not self._run_lock.acquire(blocking=False):
             return self.status(success=False, error="Sync sedang berjalan")
@@ -286,9 +324,7 @@ class SupabaseSyncService:
         payload = {
             "device_id": self.device_id,
             "display_name": self.config.device_name or self.device_id,
-            "transport": "raspi-offline-sync",
-            "is_paired": False,
-            "last_seen_at": utc_now_iso(),
+            "ssid": self.config.hotspot_ssid or self.device_id,
         }
         self.client.upsert_device(payload)
 

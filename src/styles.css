@@ -242,6 +242,19 @@ html, body {
   padding: 0 10px;
 }
 
+.field-row input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--white);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 0 10px;
+}
+
 .button-stack {
   display: grid;
   gap: 8px;
@@ -249,6 +262,68 @@ html, body {
 }
 .button-stack .btn {
   width: 100%;
+}
+
+.network-form-card {
+  padding-bottom: 10px;
+}
+
+.network-mode-section {
+  padding: 0 14px 12px;
+}
+
+.network-mode-section .info-panel {
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.network-scan-list {
+  display: grid;
+  gap: 8px;
+}
+
+.network-scan-card {
+  width: 100%;
+  border: 1px solid var(--divider);
+  margin-bottom: 0;
+  text-align: left;
+}
+
+.network-scan-card .menu-card-body {
+  padding-right: 8px;
+}
+
+.network-scan-card .menu-card-arrow {
+  min-width: 56px;
+  justify-content: flex-end;
+}
+
+.scan-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  background: var(--panel);
+  color: var(--accent-dk);
+}
+
+.scan-tag-active {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.muted-note {
+  color: var(--text-sub);
+  font-size: 12px;
+  padding: 8px 2px;
+}
+
+.is-hidden {
+  display: none !important;
 }
 
 /* ── Status strip ──────────────────────────────────────────────────────── */

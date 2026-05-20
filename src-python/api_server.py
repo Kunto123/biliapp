@@ -42,12 +42,22 @@ from camera_settings import (
 )
 from main_pipeline import BilirubinPredictionPipeline
 from config import (
+    API_BIND_HOST,
     BILIRUBIN_DEVICE_ID,
     BILIRUBIN_DEVICE_NAME,
     BILIRUBIN_HOSPITAL_ID,
     BILIRUBIN_SUPABASE_BUCKET,
+    NETWORK_DEFAULT_MODE,
+    NETWORK_FALLBACK_TIMEOUT_SECONDS,
+    NETWORK_HOTSPOT_INTERFACE,
+    NETWORK_HOTSPOT_PASSWORD,
+    NETWORK_HOTSPOT_PROFILE,
+    NETWORK_HOTSPOT_SSID,
     BILIRUBIN_SYNC_DEVICE_REGISTRY,
     BILIRUBIN_SYNC_INTERVAL_SECONDS,
+    NETWORK_RESTORE_ON_STARTUP,
+    NETWORK_WIFI_INTERFACE,
+    NETWORK_WIFI_PROFILE_PREFIX,
     DEVICE_PROFILE,
     CAMERA_CAPTURE_IMMEDIATE,
     CAMERA_CAPTURE_RETRIES,
@@ -64,6 +74,7 @@ from config import (
     USE_STAGE2,
 )
 from gpio_manager import gpio_manager
+from network_manager import NetworkConfig, NetworkManager
 from offline_store import OfflineStore
 from supabase_sync import SupabaseSyncService, SyncConfig
 
@@ -80,6 +91,7 @@ PORT = 7878
 pipeline: Optional[BilirubinPredictionPipeline] = None
 offline_store: Optional[OfflineStore] = None
 sync_service: Optional[SupabaseSyncService] = None
+network_manager: Optional[NetworkManager] = None
 preview_cache_b64: Optional[str] = None
 preview_cache_at: float = 0.0
 preview_focus_score: Optional[float] = None
@@ -90,6 +102,8 @@ preview_stream: Optional[CameraPreviewStream] = None
 preview_clients = 0
 camera_lock = threading.RLock()
 capture_in_progress = False
+network_fallback_generation = 0
+network_fallback_lock = threading.Lock()
 
 
 def _camera_is_available() -> bool:
@@ -332,6 +346,75 @@ def _active_baby_payload() -> dict:
     }
 
 
+def _network_payload() -> dict:
+    if network_manager is None:
+        return {
+            "available": False,
+            "mode": "unknown",
+            "state": "unavailable",
+            "connectivity": "unknown",
+            "internet": False,
+            "active_connection": None,
+            "active_ssid": None,
+            "ip_address": None,
+            "last_error": "Network manager belum diinisialisasi",
+        }
+    payload = network_manager.status()
+    if offline_store is not None:
+        payload["saved_mode"] = offline_store.get_state("network_mode")
+        payload["saved_profile"] = offline_store.get_state("network_profile")
+        payload["saved_ssid"] = offline_store.get_state("network_ssid")
+    return payload
+
+
+def _store_network_state(mode: str, profile: Optional[str] = None, ssid: Optional[str] = None, error: Optional[str] = None) -> None:
+    if offline_store is None:
+        return
+    offline_store.set_state("network_mode", mode)
+    if profile is not None:
+        offline_store.set_state("network_profile", profile)
+    if ssid is not None:
+        offline_store.set_state("network_ssid", ssid)
+    offline_store.set_state("network_last_error", error or "")
+
+
+def _cancel_network_fallback() -> None:
+    global network_fallback_generation
+    with network_fallback_lock:
+        network_fallback_generation += 1
+
+
+def _schedule_network_fallback_check(mode: str, profile: Optional[str]) -> None:
+    if network_manager is None or NETWORK_FALLBACK_TIMEOUT_SECONDS <= 0:
+        return
+
+    global network_fallback_generation
+    with network_fallback_lock:
+        network_fallback_generation += 1
+        generation = network_fallback_generation
+
+    def _worker() -> None:
+        time.sleep(NETWORK_FALLBACK_TIMEOUT_SECONDS)
+        with network_fallback_lock:
+            if generation != network_fallback_generation:
+                return
+        if network_manager is None:
+            return
+        status = network_manager.status()
+        if status.get("internet"):
+            return
+        try:
+            hotspot_profile = network_manager.enable_hotspot()
+            _cancel_network_fallback()
+            _store_network_state("hotspot", hotspot_profile, network_manager.config.hotspot_ssid)
+            print("[api] Network fallback ke hotspot aktif")
+        except Exception as exc:
+            _store_network_state(mode, profile, status.get("active_ssid"), str(exc))
+            print(f"[api] Network fallback gagal: {exc}")
+
+    threading.Thread(target=_worker, name="network-fallback", daemon=True).start()
+
+
 def _enqueue_capture_result(result: dict, baby: dict) -> None:
     if offline_store is None:
         return
@@ -369,7 +452,7 @@ def _enqueue_capture_result(result: dict, baby: dict) -> None:
 
 @app.on_event("startup")
 async def startup():
-    global pipeline, offline_store, sync_service
+    global pipeline, offline_store, sync_service, network_manager
     m1 = BASE_DIR / "best_model_stage1.keras"
     m2 = BASE_DIR / "best_model_stage2.keras"
     stage2_available = m2.exists() or MODEL_STAGE2_TFLITE_PATH.exists()
@@ -378,6 +461,16 @@ async def startup():
     print(f"[api] Stage2   : {m2} (keras={m2.exists()}, tflite={MODEL_STAGE2_TFLITE_PATH.exists()})")
     try:
         offline_store = OfflineStore(OFFLINE_SYNC_DB_PATH)
+        network_manager = NetworkManager(
+            NetworkConfig(
+                hotspot_ssid=NETWORK_HOTSPOT_SSID,
+                hotspot_password=NETWORK_HOTSPOT_PASSWORD,
+                hotspot_interface=NETWORK_HOTSPOT_INTERFACE,
+                wifi_interface=NETWORK_WIFI_INTERFACE,
+                hotspot_profile=NETWORK_HOTSPOT_PROFILE,
+                wifi_profile_prefix=NETWORK_WIFI_PROFILE_PREFIX,
+            )
+        )
         sync_service = SupabaseSyncService(
             offline_store,
             SyncConfig(
@@ -386,11 +479,37 @@ async def startup():
                 device_id=BILIRUBIN_DEVICE_ID,
                 device_name=BILIRUBIN_DEVICE_NAME,
                 hospital_id=BILIRUBIN_HOSPITAL_ID,
+                hotspot_ssid=NETWORK_HOTSPOT_SSID,
                 storage_bucket=BILIRUBIN_SUPABASE_BUCKET,
                 interval_seconds=BILIRUBIN_SYNC_INTERVAL_SECONDS,
                 sync_device_registry=BILIRUBIN_SYNC_DEVICE_REGISTRY,
             ),
         )
+        if network_manager is not None and NETWORK_RESTORE_ON_STARTUP and network_manager.available:
+            saved_mode = (offline_store.get_state("network_mode") or NETWORK_DEFAULT_MODE or "hotspot").strip().lower()
+            saved_profile = offline_store.get_state("network_profile") or ""
+            saved_ssid = offline_store.get_state("network_ssid") or NETWORK_HOTSPOT_SSID
+            try:
+                if saved_mode in {"wifi", "wifi_client", "client", "internet"} and saved_profile:
+                    profile = network_manager.bring_connection_up(saved_profile)
+                    _cancel_network_fallback()
+                    _store_network_state("wifi", profile, saved_ssid)
+                    _schedule_network_fallback_check("wifi", profile)
+                    print(f"[api] Network restored: wifi ({profile})")
+                else:
+                    profile = network_manager.enable_hotspot()
+                    _cancel_network_fallback()
+                    _store_network_state("hotspot", profile, network_manager.config.hotspot_ssid)
+                    print(f"[api] Network restored: hotspot ({profile})")
+            except Exception as exc:
+                print(f"[api] Network restore failed: {exc}")
+                try:
+                    profile = network_manager.enable_hotspot()
+                    _cancel_network_fallback()
+                    _store_network_state("hotspot", profile, network_manager.config.hotspot_ssid, str(exc))
+                    print(f"[api] Network fallback ke hotspot: {profile}")
+                except Exception as fallback_exc:
+                    print(f"[api] Hotspot fallback juga gagal: {fallback_exc}")
         sync_service.start()
         print(f"[api] Offline store: {OFFLINE_SYNC_DB_PATH}")
         print(f"[api] Sync configured: {sync_service.configured}")
@@ -470,11 +589,66 @@ async def get_status():
         "pending": 0,
         "last_error": "Offline store belum diinisialisasi",
     }
+    status["network"] = _network_payload()
     # Pastikan serializable
     for k, v in list(status.items()):
         if not isinstance(v, (str, int, float, bool, dict, list, type(None))):
             status[k] = str(v)
     return status
+
+
+class NetworkModePayload(BaseModel):
+    mode: str
+    ssid: Optional[str] = None
+    password: Optional[str] = None
+
+
+@app.get("/api/network/status")
+async def get_network_status():
+    return {"success": True, **_network_payload()}
+
+
+@app.get("/api/network/scan")
+async def scan_networks():
+    if network_manager is None:
+        return {"success": False, "networks": [], "error": "Network manager belum siap"}
+    if not network_manager.available:
+        return {"success": False, "networks": [], "error": "nmcli tidak tersedia"}
+    networks = network_manager.scan_wifi()
+    return {"success": True, "networks": networks, "count": len(networks)}
+
+
+@app.post("/api/network/apply")
+async def apply_network_mode(payload: NetworkModePayload):
+    if network_manager is None:
+        return {"success": False, "error": "Network manager belum siap"}
+    try:
+        result = network_manager.apply_mode(
+            payload.mode,
+            hotspot_ssid=payload.ssid or NETWORK_HOTSPOT_SSID,
+            hotspot_password=payload.password or NETWORK_HOTSPOT_PASSWORD,
+            wifi_ssid=payload.ssid,
+            wifi_password=payload.password,
+        )
+        if result["mode"] == "hotspot":
+            _cancel_network_fallback()
+            _store_network_state("hotspot", result.get("profile"), result.get("ssid") or NETWORK_HOTSPOT_SSID)
+        else:
+            _store_network_state("wifi", result.get("profile"), result.get("ssid"))
+            _schedule_network_fallback_check("wifi", result.get("profile"))
+        return {"success": True, **_network_payload(), "applied": result}
+    except Exception as exc:
+        if offline_store is not None:
+            offline_store.set_state("network_last_error", str(exc))
+        if payload.mode.strip().lower() in {"wifi", "client", "wifi_client", "internet"} and network_manager is not None:
+            try:
+                profile = network_manager.enable_hotspot()
+                _cancel_network_fallback()
+                _store_network_state("hotspot", profile, network_manager.config.hotspot_ssid, str(exc))
+                print(f"[api] Network apply gagal, fallback ke hotspot: {profile}")
+            except Exception as fallback_exc:
+                print(f"[api] Fallback hotspot gagal setelah apply WiFi: {fallback_exc}")
+        return {"success": False, "error": str(exc), **_network_payload()}
 
 
 # ── Camera ────────────────────────────────────────────────────────────────────
@@ -1027,4 +1201,4 @@ async def cleanup_images():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")
+    uvicorn.run(app, host=API_BIND_HOST, port=PORT, log_level="info")

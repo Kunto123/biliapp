@@ -198,7 +198,7 @@ pub fn run() {
                         started: true,
                         ..status_base
                     };
-                    println!("[bili-app] Python server started on 127.0.0.1:7878");
+                    println!("[bili-app] Python server started on port 7878");
                 }
                 Err(err) => {
                     let state = app.state::<PythonServer>();

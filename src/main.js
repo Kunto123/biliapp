@@ -38,6 +38,9 @@ const state = {
   activeBaby: null,
   activeBabyId: null,
   syncStatus: null,
+  networkStatus: null,
+  networkScan: [],
+  networkModeDraft: 'hotspot',
 };
 
 // ── Runtime viewport measurement ─────────────────────────────────────────
@@ -272,6 +275,7 @@ function updateBabyUi() {
 
 function syncStatusLabel(status) {
   if (!status?.configured) return 'Offline';
+  if (status?.skipped && status?.skip_reason === 'internet_unavailable') return 'Tertunda (offline)';
   if (status.failed_count > 0 || status.last_error) return 'Sync error';
   if ((status.pending ?? 0) > 0) return `Pending ${status.pending}`;
   return 'Synced';
@@ -287,6 +291,116 @@ function updateSyncUi() {
   else if (label.startsWith('Pending')) el.classList.add('sync-pending');
   else if (label === 'Sync error') el.classList.add('sync-error');
   else el.classList.add('sync-offline');
+}
+
+function networkModeLabel(mode) {
+  const normalized = String(mode || '').trim().toLowerCase();
+  if (['wifi', 'wifi_client', 'client', 'internet'].includes(normalized)) return 'WiFi Client';
+  if (['hotspot', 'ap'].includes(normalized)) return 'Hotspot';
+  return 'Tidak dikenal';
+}
+
+function networkModeFromState(status) {
+  const value = String(status?.saved_mode || status?.mode || state.networkModeDraft || 'hotspot').toLowerCase();
+  return ['wifi', 'wifi_client', 'client', 'internet'].includes(value) ? 'wifi' : 'hotspot';
+}
+
+function renderNetworkScanCards(networks) {
+  if (!Array.isArray(networks) || networks.length === 0) {
+    return `<div class="info-panel">Belum ada hasil scan WiFi.</div>`;
+  }
+
+  return networks.map(network => {
+    const security = network.security ? esc(network.security) : 'Open';
+    const signal = Number.isFinite(Number(network.signal)) ? `${Number(network.signal)}%` : '-';
+    const inUse = network.in_use ? '<span class="scan-tag scan-tag-active">Sedang dipakai</span>' : '';
+    return `
+      <button class="menu-card network-scan-card" type="button" onclick='App.pickNetworkSsid(${JSON.stringify(network.ssid)})'>
+        <div class="menu-card-bar"></div>
+        <div class="menu-card-body">
+          <div class="menu-card-title">${esc(network.ssid)}</div>
+          <div class="menu-card-sub">${security} • Signal ${esc(signal)}</div>
+        </div>
+        <div class="menu-card-arrow">${inUse || '❯'}</div>
+      </button>
+    `;
+  }).join('');
+}
+
+function renderNetworkScreen(status, networks) {
+  const mode = networkModeFromState(status);
+  state.networkModeDraft = mode;
+  const hotspotSsid = status?.hotspot_ssid || 'BiliApp-Local';
+  const activeSsid = status?.active_ssid || '-';
+  const activeConnection = status?.active_connection || '-';
+  const ipAddress = status?.ip_address || '-';
+  const internet = status?.internet ? 'Tersedia' : 'Tidak tersedia';
+  const connectivity = status?.connectivity || 'unknown';
+  const lastError = status?.last_error || status?.network_last_error || '-';
+
+  return `
+    <div class="card">
+      ${infoRow('Mode aktif', networkModeLabel(status?.mode || status?.saved_mode || mode))}
+      ${infoRow('Internet', internet)}
+      ${infoRow('Konektivitas', connectivity)}
+      ${infoRow('Koneksi aktif', activeConnection)}
+      ${infoRow('SSID aktif', activeSsid)}
+      ${infoRow('Hotspot SSID', hotspotSsid)}
+      ${infoRow('Alamat IP', ipAddress)}
+      ${infoRow('Terakhir error', lastError)}
+    </div>
+
+    <div class="card network-form-card">
+      <label class="field-row">
+        <span>Mode jaringan</span>
+        <select id="network-mode-select" onchange="App.updateNetworkModeView()">
+          <option value="hotspot"${mode === 'hotspot' ? ' selected' : ''}>Hotspot</option>
+          <option value="wifi"${mode === 'wifi' ? ' selected' : ''}>WiFi Client</option>
+        </select>
+      </label>
+
+      <div id="network-hotspot-fields" class="network-mode-section">
+        <div class="info-panel">SSID hotspot tetap dipakai sebagai UUID lokal. Password bisa diisi ulang jika Anda membuat profile baru.</div>
+        <label class="field-row">
+          <span>Password hotspot</span>
+          <input id="network-hotspot-password" type="password" placeholder="Password hotspot">
+        </label>
+        <button class="btn btn-primary" style="width:100%; margin-top:8px" onclick="App.applyNetworkMode()">
+          Aktifkan Hotspot
+        </button>
+      </div>
+
+      <div id="network-wifi-fields" class="network-mode-section">
+        <label class="field-row">
+          <span>SSID WiFi</span>
+          <input id="network-wifi-ssid" type="text" placeholder="Pilih dari hasil scan atau ketik manual">
+        </label>
+        <label class="field-row">
+          <span>Password</span>
+          <input id="network-wifi-password" type="password" placeholder="Password WiFi">
+        </label>
+        <div class="button-stack" style="margin-top:8px">
+          <button class="btn btn-primary" onclick="App.applyNetworkMode()">Hubungkan WiFi</button>
+          <button class="btn btn-secondary" onclick="App.refreshNetworkScan()">Scan Ulang SSID</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="sync-panel" style="margin-bottom:8px">
+        <div>
+          <div class="sync-panel-title">Hasil Scan WiFi</div>
+          <div class="sync-panel-sub">Tap SSID untuk mengisi form WiFi</div>
+        </div>
+        <div class="sync-panel-actions">
+          <button class="btn btn-soft" style="height:38px; padding:0 14px" onclick="App.refreshNetworkScan()">Scan</button>
+        </div>
+      </div>
+      <div class="network-scan-list">
+        ${renderNetworkScanCards(networks)}
+      </div>
+    </div>
+  `;
 }
 
 async function loadBabies() {
@@ -734,6 +848,102 @@ const App = {
   goSettings() {
     stopCamera();
     showScreen('screen-settings');
+  },
+
+  async goNetworkSettings() {
+    showScreen('screen-network', async () => {
+      await this.loadNetworkSettings();
+    });
+  },
+
+  async loadNetworkSettings() {
+    const content = document.getElementById('network-content');
+    if (!content) return;
+    content.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-sub)">Memuat…</div>`;
+    try {
+      const [statusResult, scanResult] = await Promise.allSettled([
+        apiGet('/api/network/status'),
+        apiGet('/api/network/scan'),
+      ]);
+      const status = statusResult.status === 'fulfilled' && statusResult.value ? statusResult.value : { available: false, mode: 'unknown' };
+      const networks = scanResult.status === 'fulfilled' && scanResult.value?.networks ? scanResult.value.networks : [];
+      state.networkStatus = status;
+      state.networkScan = networks;
+      content.innerHTML = renderNetworkScreen(status, networks);
+      this.updateNetworkModeView();
+    } catch (err) {
+      content.innerHTML = `<div style="padding:20px; color:var(--err)">Gagal memuat info jaringan: ${esc(err?.message || err || 'error tidak diketahui')}</div>`;
+    }
+  },
+
+  updateNetworkModeView() {
+    const modeSelect = document.getElementById('network-mode-select');
+    const mode = modeSelect?.value || state.networkModeDraft || 'hotspot';
+    state.networkModeDraft = mode;
+
+    const hotspotFields = document.getElementById('network-hotspot-fields');
+    const wifiFields = document.getElementById('network-wifi-fields');
+    if (hotspotFields) hotspotFields.classList.toggle('is-hidden', mode !== 'hotspot');
+    if (wifiFields) wifiFields.classList.toggle('is-hidden', mode !== 'wifi');
+  },
+
+  pickNetworkSsid(ssid) {
+    const modeSelect = document.getElementById('network-mode-select');
+    const wifiSsid = document.getElementById('network-wifi-ssid');
+    if (modeSelect) modeSelect.value = 'wifi';
+    if (wifiSsid) wifiSsid.value = ssid;
+    this.updateNetworkModeView();
+  },
+
+  async refreshNetworkScan() {
+    try {
+      const payload = await apiGet('/api/network/scan');
+      if (payload?.success) {
+        state.networkScan = payload.networks || [];
+        if (state.currentScreen === 'screen-network') {
+          const content = document.getElementById('network-content');
+          if (content) {
+            content.innerHTML = renderNetworkScreen(state.networkStatus || {}, state.networkScan);
+            this.updateNetworkModeView();
+          }
+        }
+      } else {
+        toast(payload?.error || 'Scan jaringan gagal');
+      }
+    } catch {
+      toast('Gagal menghubungi server');
+    }
+  },
+
+  async applyNetworkMode() {
+    const modeSelect = document.getElementById('network-mode-select');
+    const mode = modeSelect?.value || state.networkModeDraft || 'hotspot';
+    const hotspotPassword = document.getElementById('network-hotspot-password')?.value || '';
+    const wifiSsid = document.getElementById('network-wifi-ssid')?.value || '';
+    const wifiPassword = document.getElementById('network-wifi-password')?.value || '';
+    const hotspotSsid = state.networkStatus?.hotspot_ssid || 'BiliApp-Local';
+
+    if (mode === 'wifi' && !wifiSsid.trim()) {
+      toast('Isi SSID WiFi terlebih dahulu');
+      return;
+    }
+
+    try {
+      const payload = mode === 'hotspot'
+        ? { mode: 'hotspot', ssid: hotspotSsid, password: hotspotPassword }
+        : { mode: 'wifi', ssid: wifiSsid.trim(), password: wifiPassword };
+      const resp = await apiPost('/api/network/apply', payload);
+      if (resp?.success) {
+        state.networkStatus = resp;
+        state.networkModeDraft = resp.mode === 'wifi' ? 'wifi' : 'hotspot';
+        toast(`✓ Mode jaringan: ${networkModeLabel(resp.mode || mode)}`);
+        await this.loadNetworkSettings();
+      } else {
+        toast(resp?.error || 'Gagal menerapkan mode jaringan');
+      }
+    } catch (err) {
+      toast(err?.message || 'Gagal menghubungi server');
+    }
   },
 
   // ── Camera config ─────────────────────────────────────────────────────────
