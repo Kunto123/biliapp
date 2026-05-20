@@ -32,8 +32,8 @@ class FakeSupabaseClient:
             }
         ]
 
-    def upsert_device(self, payload):
-        self.upserted_devices.append(payload)
+    def upsert_device(self, payload, id_column="device_id"):
+        self.upserted_devices.append((payload, id_column))
 
     def upload_storage_object(self, bucket, object_path, data, content_type="application/octet-stream"):
         self.uploads.append((bucket, object_path, data, content_type))
@@ -123,13 +123,48 @@ class SupabaseSyncTests(unittest.TestCase):
 
                 self.assertEqual(len(fake.upserted_devices), 1)
                 self.assertEqual(
-                    fake.upserted_devices[0],
+                    fake.upserted_devices[0][0],
                     {
                         "device_id": "dev-1",
                         "display_name": "Device 1",
                         "ssid": "BiliApp-Local",
                     },
                 )
+                self.assertEqual(fake.upserted_devices[0][1], "device_id")
+            finally:
+                store.close()
+
+    def test_device_registry_can_use_devices_id_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = OfflineStore(Path(tmp) / "offline_sync.db")
+            try:
+                service = SupabaseSyncService(
+                    store,
+                    SyncConfig(
+                        supabase_url="https://example.supabase.co",
+                        supabase_key="key",
+                        device_id="dev-2",
+                        device_name="Device 2",
+                        hotspot_ssid="BiliApp-Local",
+                        device_id_column="devices_id",
+                        sync_device_registry=True,
+                    ),
+                )
+                fake = FakeSupabaseClient()
+                service.client = fake
+
+                service.sync_once()
+
+                self.assertEqual(len(fake.upserted_devices), 1)
+                self.assertEqual(
+                    fake.upserted_devices[0][0],
+                    {
+                        "devices_id": "dev-2",
+                        "display_name": "Device 2",
+                        "ssid": "BiliApp-Local",
+                    },
+                )
+                self.assertEqual(fake.upserted_devices[0][1], "devices_id")
             finally:
                 store.close()
 

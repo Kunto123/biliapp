@@ -334,12 +334,15 @@ function renderNetworkScreen(status, networks) {
   const activeSsid = status?.active_ssid || '-';
   const activeConnection = status?.active_connection || '-';
   const ipAddress = status?.ip_address || '-';
+  const apiUrl = status?.api_url || '-';
+  const statusLabel = status?.status_label || (status?.internet ? 'Online' : networkModeLabel(status?.mode || mode));
   const internet = status?.internet ? 'Tersedia' : 'Tidak tersedia';
   const connectivity = status?.connectivity || 'unknown';
   const lastError = status?.last_error || status?.network_last_error || '-';
 
   return `
     <div class="card">
+      ${infoRow('Status jaringan', statusLabel)}
       ${infoRow('Mode aktif', networkModeLabel(status?.mode || status?.saved_mode || mode))}
       ${infoRow('Internet', internet)}
       ${infoRow('Konektivitas', connectivity)}
@@ -347,6 +350,7 @@ function renderNetworkScreen(status, networks) {
       ${infoRow('SSID aktif', activeSsid)}
       ${infoRow('Hotspot SSID', hotspotSsid)}
       ${infoRow('Alamat IP', ipAddress)}
+      ${infoRow('Alamat API', apiUrl)}
       ${infoRow('Terakhir error', lastError)}
     </div>
 

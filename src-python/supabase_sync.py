@@ -147,12 +147,12 @@ class SupabaseClient:
         )
         return rows if isinstance(rows, list) else []
 
-    def upsert_device(self, device: dict[str, Any]) -> None:
+    def upsert_device(self, device: dict[str, Any], id_column: str = "device_id") -> None:
         self._request_json(
             "POST",
             "/rest/v1/devices",
             payload=[device],
-            query={"on_conflict": "device_id"},
+            query={"on_conflict": id_column or "device_id"},
             headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
 
@@ -173,6 +173,7 @@ class SyncConfig:
     device_name: str = ""
     hospital_id: str = ""
     hotspot_ssid: str = ""
+    device_id_column: str = "device_id"
     storage_bucket: str = "measurement-images"
     interval_seconds: int = 60
     sync_device_registry: bool = False
@@ -194,6 +195,10 @@ class SupabaseSyncService:
     @property
     def configured(self) -> bool:
         return self.client.configured
+
+    @property
+    def syncing(self) -> bool:
+        return self._run_lock.locked()
 
     def _remote_reachable(self) -> bool:
         checker = getattr(self.client, "remote_reachable", None)
@@ -318,15 +323,17 @@ class SupabaseSyncService:
             "synced_count": counts["synced"],
             "local_only_count": counts["local_only"],
             "last_error": last_error,
+            "syncing": self.syncing,
         }
 
     def _upsert_device(self) -> None:
+        id_column = self.config.device_id_column or "device_id"
         payload = {
-            "device_id": self.device_id,
+            id_column: self.device_id,
             "display_name": self.config.device_name or self.device_id,
             "ssid": self.config.hotspot_ssid or self.device_id,
         }
-        self.client.upsert_device(payload)
+        self.client.upsert_device(payload, id_column=id_column)
 
     def _upload_measurement_image(self, row: dict[str, Any]) -> str:
         image_path = row.get("image_path")
