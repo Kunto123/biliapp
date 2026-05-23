@@ -48,15 +48,36 @@ class NetworkManager:
     def available(self) -> bool:
         return bool(self._nmcli)
 
+    # def _run(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    #     if not self.available:
+    #         raise RuntimeError("nmcli tidak tersedia")
+    #     result = subprocess.run(
+    #         [self._nmcli, *args],
+    #         check=False,
+    #         capture_output=True,
+    #         text=True,
+    #     )
+    #     if check and result.returncode != 0:
+    #         detail = (result.stderr or result.stdout or "nmcli gagal").strip()
+    #         raise RuntimeError(detail)
+    #     return result
     def _run(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         if not self.available:
             raise RuntimeError("nmcli tidak tersedia")
-        result = subprocess.run(
-            [self._nmcli, *args],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        
+        try:
+            # [KODE BARU] Tambahkan timeout=3.0 agar tidak hang 
+            result = subprocess.run(
+                [self._nmcli, *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3.0
+            )
+        except subprocess.TimeoutExpired:
+            # Jika nmcli bengong lebih dari 3 detik, paksa gagal
+            raise RuntimeError("nmcli timeout: pengecekan jaringan terlalu lambat")
+
         if check and result.returncode != 0:
             detail = (result.stderr or result.stdout or "nmcli gagal").strip()
             raise RuntimeError(detail)

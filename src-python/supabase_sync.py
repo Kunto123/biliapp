@@ -36,19 +36,44 @@ class SupabaseClient:
     def configured(self) -> bool:
         return bool(self.url and self.key)
 
-    def remote_reachable(self, timeout_seconds: float = 1.5) -> bool:
+    def remote_reachable(self, timeout_seconds: float = 1.0) -> bool:
         if not self.configured:
             return False
+        
+        # [KODE BARU] Cek koneksi internet murni via IP (menghindari DNS hang)
+        try:
+            # Ping singkat ke Public DNS tanpa resolve nama host
+            with socket.create_connection(("8.8.8.8", 53), timeout=timeout_seconds):
+                pass
+        except OSError:
+            # Jika dalam 1 detik gagal, anggap tidak ada internet tanpa mengecek Supabase
+            return False 
+
         parsed = urllib.parse.urlparse(self.url)
         host = parsed.hostname
         if not host:
             return False
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        
         try:
+            # Jika ada internet, baru pastikan server Supabase bisa dijangkau
             with socket.create_connection((host, port), timeout=timeout_seconds):
                 return True
         except OSError:
             return False
+    # def remote_reachable(self, timeout_seconds: float = 1.5) -> bool:
+    #     if not self.configured:
+    #         return False
+    #     parsed = urllib.parse.urlparse(self.url)
+    #     host = parsed.hostname
+    #     if not host:
+    #         return False
+    #     port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    #     try:
+    #         with socket.create_connection((host, port), timeout=timeout_seconds):
+    #             return True
+    #     except OSError:
+    #         return False
 
     def _headers(self, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
         headers = {
