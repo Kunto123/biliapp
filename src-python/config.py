@@ -47,6 +47,7 @@ def _is_valid_env_key(key: str) -> bool:
     )
 
 
+
 def _load_dotenv(path: Path = DOTENV_PATH) -> bool:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -198,7 +199,7 @@ CAMERA_RESOLUTION = _env_resolution(
     (1920, 1080) if IS_RASPBERRY_PI else (3840, 2160),
 )
 CAMERA_PREVIEW_RESOLUTION = _env_resolution("BILIRUBIN_CAMERA_PREVIEW_RESOLUTION", (640, 480))
-CAMERA_ROTATION = _env_rotation("BILIRUBIN_CAMERA_ROTATION", 0)
+CAMERA_ROTATION = _env_rotation("BILIRUBIN_CAMERA_ROTATION", 180)
 CAMERA_AUTO_EXPOSURE = _env_bool("BILIRUBIN_CAMERA_AUTO_EXPOSURE", True)
 CAMERA_BRIGHTNESS = _env_float("BILIRUBIN_CAMERA_BRIGHTNESS", 0.0)
 CAMERA_TIMEOUT_SECONDS = _env_float("BILIRUBIN_CAMERA_TIMEOUT_SECONDS", 8.0 if IS_RASPBERRY_PI else 20.0)

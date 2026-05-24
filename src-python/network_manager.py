@@ -234,7 +234,7 @@ class NetworkManager:
                 "modify",
                 profile_name,
                 "connection.autoconnect",
-                "yes",
+                "no",
                 "802-11-wireless.ssid",
                 hotspot_ssid,
                 "802-11-wireless.mode",

@@ -49,11 +49,28 @@ done
 cd "$APP_ROOT"
 mkdir -p logs
 
+#if [ "$AUTOSTART" -eq 1 ]; then
+#  exec >> "$APP_ROOT/logs/autostart.log" 2>&1
+#  echo
+#  echo "[bili-app] Autostart run at $(date -Is)"
+#fi
+
 if [ "$AUTOSTART" -eq 1 ]; then
   exec >> "$APP_ROOT/logs/autostart.log" 2>&1
   echo
   echo "[bili-app] Autostart run at $(date -Is)"
+  
+  # --- KODE BARU DIMULAI DARI SINI ---
+  echo "[bili-app] Menunggu desktop compositor (Wayland/X11) siap..."
+  
+  # Beri waktu 5 detik agar desktop Pi selesai memuat panel dan taskbar
+  sleep 5 
+  
+  # Paksa X11 agar mode fullscreen GTK/Tauri lebih andal (diambil dari logika launch-gui.sh Anda)
+  export GDK_BACKEND=x11 
+  # --- KODE BARU SELESAI ---
 fi
+
 
 load_dotenv_defaults() {
   local dotenv="$APP_ROOT/.env"
@@ -141,6 +158,15 @@ fi
 if [ "$BUILD_ONLY" -eq 1 ]; then
   echo "[bili-app] Build ready: $BIN_PATH"
   exit 0
+fi
+
+echo "[bili-app] Checking virtual interface ap0..."
+if ! iw dev | grep -q ap0; then
+  echo "[bili-app] Creating ap0 interface for hotspot..."
+  # Harus menggunakan sudo (pastikan user Pi tidak perlu password untuk perintah iw/ip)
+  sudo iw dev wlan0 interface add ap0 type __ap
+  sudo ip link set dev ap0 address 12:34:56:78:90:ab
+  sudo ip link set dev ap0 up
 fi
 
 echo "[bili-app] Starting production app..."
