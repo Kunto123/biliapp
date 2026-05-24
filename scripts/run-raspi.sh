@@ -143,6 +143,18 @@ if [ "$BUILD_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+echo "[bili-app] Checking virtual interface ap0..."
+if ! iw dev | grep -q ap0; then
+  echo "[bili-app] Creating ap0 interface for hotspot..."
+  # Harus menggunakan sudo (pastikan user Pi tidak perlu password untuk perintah iw/ip)
+  sudo iw dev wlan0 interface add ap0 type __ap
+  sudo ip link set dev ap0 address 12:34:56:78:90:ab
+  sudo ip link set dev ap0 up
+fi
+
+echo "[bili-app] Starting companion beacon..."
+python3 "$SCRIPT_DIR/../src-python/beacon_companion.py" &
+
 echo "[bili-app] Starting production app..."
 echo "[bili-app] App root: $APP_ROOT"
 echo "[bili-app] Python  : $BILIRUBIN_PYTHON"

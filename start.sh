@@ -1,7 +1,9 @@
 #!/bin/bash
 # start.sh — launcher BiliApp
 # Nonaktifkan SPI sebelum start agar BCM 7 & 8 bebas dipakai sebagai GPIO
-
+echo "Starting Companion Beacon..."
+python3 src-python/beacon_companion.py &
+COMPANION_PID=$!
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "[start] Menonaktifkan SPI..."
