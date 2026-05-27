@@ -42,7 +42,8 @@ class OfflineStore:
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS babies (
-                    baby_id INTEGER PRIMARY KEY,
+                    baby_id TEXT PRIMARY KEY,
+                    hospital_id TEXT,
                     baby_name TEXT NOT NULL,
                     baby_dob TEXT,
                     baby_weight REAL,
@@ -137,7 +138,8 @@ class OfflineStore:
                 continue
             rows.append(
                 (
-                    int(baby_id),
+                    str(baby_id),
+                    baby.get("hospital_id"),
                     str(baby_name),
                     baby.get("baby_dob"),
                     baby.get("baby_weight"),
@@ -155,11 +157,12 @@ class OfflineStore:
             self._conn.executemany(
                 """
                 INSERT INTO babies(
-                    baby_id, baby_name, baby_dob, baby_weight, is_archived,
+                    baby_id, hospital_id, baby_name, baby_dob, baby_weight, is_archived,
                     created_at, updated_at, last_synced_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(baby_id) DO UPDATE SET
+                    hospital_id = excluded.hospital_id,
                     baby_name = excluded.baby_name,
                     baby_dob = excluded.baby_dob,
                     baby_weight = excluded.baby_weight,
@@ -182,7 +185,7 @@ class OfflineStore:
         with self._lock:
             return [dict(row) for row in self._conn.execute(sql, params).fetchall()]
 
-    def get_baby(self, baby_id: int) -> Optional[dict[str, Any]]:
+    def get_baby(self, baby_id: str) -> Optional[dict[str, Any]]:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM babies WHERE baby_id = ?",
@@ -190,21 +193,21 @@ class OfflineStore:
             ).fetchone()
             return _row_to_dict(row)
 
-    def set_active_baby(self, baby_id: int) -> dict[str, Any]:
+    def set_active_baby(self, baby_id: str) -> dict[str, Any]:
         baby = self.get_baby(baby_id)
         if not baby:
             raise ValueError("Profil bayi tidak ditemukan di cache lokal")
         if int(baby.get("is_archived") or 0):
             raise ValueError("Profil bayi sudah diarsipkan")
-        self.set_state("active_baby_id", int(baby_id))
+        self.set_state("active_baby_id", str(baby_id))
         return baby
 
-    def get_active_baby_id(self) -> Optional[int]:
+    def get_active_baby_id(self) -> Optional[str]:
         value = self.get_state("active_baby_id")
         if value is None:
             return None
         try:
-            return int(value)
+            return str(value)
         except (TypeError, ValueError):
             return None
 
@@ -362,14 +365,14 @@ class OfflineStore:
 
     def get_measurement_stats(
         self,
-        baby_id: Optional[int] = None,
+        baby_id: Optional[str] = None,
         include_all: bool = False,
     ) -> dict[str, Any]:
         where = []
         params: list[Any] = []
         if not include_all and baby_id is not None:
             where.append("baby_id = ?")
-            params.append(int(baby_id))
+            params.append(str(baby_id))
         where_sql = " WHERE " + " AND ".join(where) if where else ""
         with self._lock:
             row = self._conn.execute(

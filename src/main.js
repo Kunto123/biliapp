@@ -253,7 +253,7 @@ function setBabyState(payload) {
     state.activeBabyId = state.activeBaby?.baby_id ?? null;
   }
   if (!state.activeBaby && state.activeBabyId != null) {
-    state.activeBaby = state.babies.find(b => Number(b.baby_id) === Number(state.activeBabyId)) ?? null;
+    state.activeBaby = state.babies.find(b => String(b.baby_id) === String(state.activeBabyId)) ?? null;
   }
   updateBabyUi();
 }
@@ -692,15 +692,22 @@ const App = {
     }
   },
 
-  async selectBaby(babyId) {
+ async selectBaby(babyId) {
     try {
-      const payload = await apiPut('/api/babies/active', { baby_id: Number(babyId) });
+      const payload = await apiPut('/api/babies/active', { baby_id: String(babyId) });
       if (payload?.success) {
         setBabyState(payload);
         renderBabiesScreen();
         toast(`Bayi aktif: ${payload.active_baby?.baby_name ?? babyId}`);
       } else {
-        toast(payload?.error || payload?.detail || 'Gagal memilih bayi');
+        let errorMsg = payload?.error || 'Gagal memilih bayi';
+        // Cegat array error dari FastAPI agar tidak jadi [object Object]
+        if (Array.isArray(payload?.detail)) {
+            errorMsg = payload.detail[0].msg; 
+        } else if (payload?.detail) {
+            errorMsg = payload.detail;
+        }
+        toast(errorMsg);
       }
     } catch (err) {
       toast(err?.message || 'Gagal memilih bayi');
@@ -1166,10 +1173,13 @@ function buildInfoSections(sections) {
 }
 
 function esc(str) {
+  if (str === null || str === undefined) return '';
   return String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function classifyBilirubin(value) {
@@ -1216,10 +1226,13 @@ function renderBabiesScreen() {
   const syncLine = `${syncStatusLabel(sync)}${sync.last_error ? ` - ${esc(sync.last_error)}` : ''}`;
 
   const rows = babies.map(baby => {
-    const isActive = Number(baby.baby_id) === Number(activeId);
+    // Pastikan UUID dibandingkan sebagai teks yang sama persis
+    const isActive = String(baby.baby_id) === String(activeId); 
     const archived = Number(baby.is_archived || 0) === 1;
+    
+    // UUID wajib dibungkus tanda kutip satu pada onclick
     return `
-      <button class="baby-row ${isActive ? 'is-active' : ''}" ${archived ? 'disabled' : ''} onclick="App.selectBaby(${Number(baby.baby_id)})">
+      <button class="baby-row ${isActive ? 'is-active' : ''}" ${archived ? 'disabled' : ''} onclick="App.selectBaby('${baby.baby_id}')">
         <div class="baby-row-main">
           <div class="baby-row-name">${esc(baby.baby_name)}</div>
           <div class="baby-row-meta">ID ${esc(baby.baby_id)} · Lahir ${esc(formatBabyDob(baby.baby_dob))}</div>

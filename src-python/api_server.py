@@ -1138,7 +1138,7 @@ async def capture_and_predict():
 # ── Babies & Sync ────────────────────────────────────────────────────────────
 
 class ActiveBabyPayload(BaseModel):
-    baby_id: int
+    baby_id: str
 
 
 @app.get("/api/babies")
@@ -1212,7 +1212,7 @@ async def get_gpio_status():
 @app.get("/api/history")
 async def get_history(
     limit: int = 10,
-    baby_id: Optional[int] = None,
+    baby_id: Optional[str] = None,
     show_all: bool = Query(False, alias="all"),
 ):
     if offline_store is not None:
@@ -1286,7 +1286,7 @@ async def get_latest_image():
 
 @app.get("/api/stats")
 async def get_stats(
-    baby_id: Optional[int] = None,
+    baby_id: Optional[str] = None,
     show_all: bool = Query(False, alias="all"),
 ):
     if offline_store is not None:

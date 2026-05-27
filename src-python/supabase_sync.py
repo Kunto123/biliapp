@@ -36,7 +36,7 @@ class SupabaseClient:
     def configured(self) -> bool:
         return bool(self.url and self.key)
 
-    def remote_reachable(self, timeout_seconds: float = 1.0) -> bool:
+    def remote_reachable(self, timeout_seconds: float = 5.0) -> bool:
         if not self.configured:
             return False
         
@@ -166,7 +166,7 @@ class SupabaseClient:
             "GET",
             "/rest/v1/babies",
             query={
-                "select": "baby_id,baby_name,baby_dob,baby_weight,is_archived,created_at,updated_at",
+                "select": "baby_id,hospital_id,baby_name,baby_dob,baby_weight,is_archived,created_at,updated_at",
                 "order": "baby_name.asc",
             },
         )
