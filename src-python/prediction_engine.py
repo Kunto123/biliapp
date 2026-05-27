@@ -15,11 +15,39 @@ import cv2
 import numpy as np
 
 from data_artifacts import ROI_CONFIG, REFERENCE_PALETTE_DF, GRAY_PATCHES_REFERENCE_DF
-from preprocessing import BilirubinPreprocessor
+from preprocessing import BilirubinPreprocessor, extract_color_features
 
 # Suppress TensorFlow warnings when the Keras fallback is used.
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 warnings.filterwarnings("ignore")
+
+
+# ── Custom loss/metrics for V21 multi-input model ───────────────────────────
+
+def huber_loss_fn(y_true, y_pred, delta=2.0):
+    """Huber loss — robust to outliers, used by V21 training."""
+    import tensorflow as tf
+    error = y_true - y_pred
+    abs_error = tf.abs(error)
+    quad = tf.minimum(abs_error, delta)
+    lin = abs_error - quad
+    return tf.reduce_mean(0.5 * quad**2 + delta * lin)
+
+
+def huber_mae_fn(y_true, y_pred):
+    """MAE metric with Huber-style naming for V21 model compatibility."""
+    import tensorflow as tf
+    return tf.reduce_mean(tf.abs(y_true - y_pred))
+
+
+# ── Model input detection helpers ───────────────────────────────────────────
+
+def _is_multi_input_model(model) -> bool:
+    """Check if a Keras model expects multiple inputs (V21 multi-input)."""
+    if model is None:
+        return False
+    inputs = getattr(model, "inputs", None)
+    return bool(inputs is not None and len(inputs) > 1)
 
 
 def _numpy_major_version() -> int:
@@ -33,6 +61,8 @@ MODEL_MODE_STAGE1 = "stage1"
 MODEL_MODE_STAGE2 = "stage2"
 MODEL_MODE_AVERAGE = "stage1_stage2_average"
 MODEL_MODES = {MODEL_MODE_STAGE1, MODEL_MODE_STAGE2, MODEL_MODE_AVERAGE}
+PREPROCESS_PROFILE_TRAINING = "yolo_wb_skin_crop"
+PREPROCESS_PROFILE_CARD = "card_calibrated"
 MODEL_MODE_ALIASES = {
     "1": MODEL_MODE_STAGE1,
     "stage1": MODEL_MODE_STAGE1,
@@ -89,11 +119,19 @@ class BilirubinPredictor:
         tflite_stage1_path: Optional[str] = None,
         tflite_stage2_path: Optional[str] = None,
         allow_backend_fallback: bool = True,
+        preprocess_profile: str = PREPROCESS_PROFILE_TRAINING,
+        yolo_detector_path: Optional[str] = None,
+        active_model_id: Optional[str] = None,
+        active_model_name: Optional[str] = None,
     ):
         self.model_stage1_path = model_stage1_path
         self.model_stage2_path = model_stage2_path
         self.tflite_stage1_path = tflite_stage1_path
         self.tflite_stage2_path = tflite_stage2_path
+        self.active_model_id = active_model_id or Path(model_stage1_path).stem
+        self.active_model_name = active_model_name or Path(model_stage1_path).name
+        self.preprocess_profile = preprocess_profile or PREPROCESS_PROFILE_TRAINING
+        self.yolo_detector_path = yolo_detector_path
         self.requested_model_mode = normalize_model_mode(
             model_mode,
             MODEL_MODE_STAGE2 if use_stage2 else MODEL_MODE_STAGE1,
@@ -115,6 +153,7 @@ class BilirubinPredictor:
             roi_config=ROI_CONFIG,
             reference_palette_df=REFERENCE_PALETTE_DF,
             gray_reference_df=GRAY_PATCHES_REFERENCE_DF,
+            yolo_detector_path=yolo_detector_path,
         )
 
         self._load_models()
@@ -176,14 +215,25 @@ class BilirubinPredictor:
                 self.last_error = f"Stage 1 Keras model not found: {self.model_stage1_path}"
                 return False
 
-            self.model_stage1 = keras.models.load_model(self.model_stage1_path)
-            print(f"[model] Loaded Keras stage 1: {self.model_stage1_path}")
+            _custom_objs = {
+                'huber_loss_fn': huber_loss_fn,
+                'huber_mae_fn': huber_mae_fn,
+            }
+
+            self.model_stage1 = keras.models.load_model(
+                self.model_stage1_path, compile=False, custom_objects=_custom_objs
+            )
+            print(f"[model] Loaded Keras stage 1: {self.model_stage1_path} "
+                  f"({len(self.model_stage1.inputs)} input(s))")
 
             self.model_stage2 = None
             if self.model_stage2_path and Path(self.model_stage2_path).exists():
                 try:
-                    self.model_stage2 = keras.models.load_model(self.model_stage2_path)
-                    print(f"[model] Loaded Keras stage 2: {self.model_stage2_path}")
+                    self.model_stage2 = keras.models.load_model(
+                        self.model_stage2_path, compile=False, custom_objects=_custom_objs
+                    )
+                    print(f"[model] Loaded Keras stage 2: {self.model_stage2_path} "
+                          f"({len(self.model_stage2.inputs)} input(s))")
                 except Exception as exc:
                     print(f"[model] Failed to load Keras stage 2: {exc}")
             else:
@@ -206,15 +256,14 @@ class BilirubinPredictor:
                 self.last_error = f"Stage 1 TFLite model not found: {self.tflite_stage1_path}"
                 return False
 
-            if _numpy_major_version() >= 2:
+            Interpreter = self._get_tflite_interpreter_class()
+            if self.tflite_runtime == "tflite_runtime" and _numpy_major_version() >= 2:
                 self.last_error = (
                     "tflite-runtime is incompatible with NumPy "
                     f"{np.__version__}. Reinstall the Raspberry Pi environment with "
                     "`pip install --force-reinstall 'numpy>=1.26,<2'` and then reinstall requirements-rpi.txt."
                 )
                 return False
-
-            Interpreter = self._get_tflite_interpreter_class()
             self.model_stage1 = Interpreter(model_path=str(self.tflite_stage1_path))
             self.model_stage1.allocate_tensors()
             print(f"[model] Loaded TFLite stage 1: {self.tflite_stage1_path}")
@@ -332,6 +381,14 @@ class BilirubinPredictor:
         """
         Predict bilirubin from image (BGR format from camera).
 
+        Automatically detects whether the model is single-input (V19 or older)
+        or multi-input (V21) and adjusts preprocessing + inference accordingly.
+        
+        For V21 multi-input models:
+          - Preprocess with use_palette_correction=False (WB-only, no CCM)
+          - Extract 24 color features from the preprocessed image
+          - Feed both image and features to the model
+
         Returns:
             (prediction_value, info_dict)
         """
@@ -342,13 +399,41 @@ class BilirubinPredictor:
                     "success": False,
                     "model_backend": self.model_backend,
                     "model_mode": self.model_mode,
+                    "active_model_id": self.active_model_id,
+                    "active_model_name": self.active_model_name,
                     "model_loaded": False,
                 }
 
-            preprocessed_rgb, preprocess_mode, preprocess_diag = self.preprocessor.preprocess_image(
-                image_bgr,
-                return_diagnostics=True,
-            )
+            # Determine which model to use for mode detection
+            active_model = self.model_stage2 if (
+                self.model_mode != MODEL_MODE_STAGE1 and self.model_stage2 is not None
+            ) else self.model_stage1
+            is_multi = _is_multi_input_model(active_model)
+
+            # ── Preprocessing ─────────────────────────────────────────────
+            if self.preprocess_profile == PREPROCESS_PROFILE_TRAINING and not is_multi:
+                # V18/V19 training path: YOLO crop + WB-only + skin ROI.
+                preprocessed_rgb, preprocess_mode, preprocess_diag = \
+                    self.preprocessor.preprocess_training_flow(
+                        image_bgr,
+                        return_diagnostics=True,
+                    )
+            elif is_multi:
+                # V21 multi-input: WB-only, no palette correction
+                preprocessed_rgb, preprocess_mode, preprocess_diag = \
+                    self.preprocessor.preprocess_image(
+                        image_bgr,
+                        return_diagnostics=True,
+                        use_palette_correction=False,
+                    )
+            else:
+                # Legacy card-aligned path; keep palette correction disabled for model parity.
+                preprocessed_rgb, preprocess_mode, preprocess_diag = \
+                    self.preprocessor.preprocess_image(
+                        image_bgr,
+                        return_diagnostics=True,
+                        use_palette_correction=False,
+                    )
 
             if preprocessed_rgb is None:
                 return None, {
@@ -357,6 +442,8 @@ class BilirubinPredictor:
                     "preprocessing_mode": preprocess_mode,
                     "model_backend": self.model_backend,
                     "model_mode": self.model_mode,
+                    "active_model_id": self.active_model_id,
+                    "active_model_name": self.active_model_name,
                     "diagnostics": preprocess_diag,
                     "gatecheck_passed": preprocess_diag.get("gatecheck_passed", False),
                     "gatecheck_errors": preprocess_diag.get("gatecheck_errors", []),
@@ -367,30 +454,63 @@ class BilirubinPredictor:
                     "quality_flags": preprocess_diag.get("quality_flags", {}),
                 }
 
+            # ── Prepare image input ───────────────────────────────────────
             resized_rgb = cv2.resize(preprocessed_rgb, self.target_size)
-            input_batch = np.expand_dims(resized_rgb, axis=0).astype(np.float32)
-            input_batch = self._preprocess_model_input(input_batch)
+            img_input_batch = np.expand_dims(resized_rgb, axis=0).astype(np.float32)
+            img_input_batch = self._preprocess_model_input(img_input_batch)
 
+            # ── Run inference ─────────────────────────────────────────────
             started = time.perf_counter()
-            INFERENCE_TIMEOUT = 30.0  # detik
+            INFERENCE_TIMEOUT = 30.0
+
+            def _run_with_model(model, img_batch, feat_batch=None):
+                """Run inference with single or multi input."""
+                if is_multi and feat_batch is not None:
+                    # Multi-input model: feed dict with named inputs
+                    import tensorflow as tf
+                    if self.model_backend == "tflite":
+                        raise RuntimeError(
+                            "V21 multi-input model only supports Keras backend. "
+                            "Convert to TFLite with signature first."
+                        )
+                    pred = model.predict(
+                        {'img_input': img_batch, 'feat_input': feat_batch},
+                        verbose=0
+                    )
+                    return float(np.ravel(pred)[0])
+                else:
+                    return self._run_model(model, img_batch)
+
+            if is_multi:
+                # Extract 24 color features from the resized RGB image
+                color_features = extract_color_features(resized_rgb)
+                feat_input_batch = np.expand_dims(color_features, axis=0).astype(np.float32)
+            else:
+                feat_input_batch = None
+                color_features = None
+
             if self.model_mode == MODEL_MODE_STAGE2 and self.model_stage2 is not None:
-                bilirubin_prediction = self._run_model(self.model_stage2, input_batch)
+                bilirubin_prediction = _run_with_model(
+                    self.model_stage2, img_input_batch, feat_input_batch)
                 if time.perf_counter() - started > INFERENCE_TIMEOUT:
-                    raise TimeoutError(f"Inference stage 2 melebihi {INFERENCE_TIMEOUT}s")
+                    raise TimeoutError(f"Inference stage 2 exceeded {INFERENCE_TIMEOUT}s")
                 model_used = "stage2_only"
             elif self.model_mode == MODEL_MODE_AVERAGE and self.model_stage2 is not None:
-                pred_stage1 = self._run_model(self.model_stage1, input_batch)
+                pred_s1 = _run_with_model(
+                    self.model_stage1, img_input_batch, feat_input_batch)
                 if time.perf_counter() - started > INFERENCE_TIMEOUT:
-                    raise TimeoutError(f"Inference stage 1 melebihi {INFERENCE_TIMEOUT}s")
-                pred_stage2 = self._run_model(self.model_stage2, input_batch)
+                    raise TimeoutError(f"Inference stage 1 exceeded {INFERENCE_TIMEOUT}s")
+                pred_s2 = _run_with_model(
+                    self.model_stage2, img_input_batch, feat_input_batch)
                 if time.perf_counter() - started > INFERENCE_TIMEOUT:
-                    raise TimeoutError(f"Inference stage 2 melebihi {INFERENCE_TIMEOUT}s")
-                bilirubin_prediction = (pred_stage1 + pred_stage2) / 2.0
+                    raise TimeoutError(f"Inference stage 2 exceeded {INFERENCE_TIMEOUT}s")
+                bilirubin_prediction = (pred_s1 + pred_s2) / 2.0
                 model_used = "stage1_stage2_average"
             else:
-                bilirubin_prediction = self._run_model(self.model_stage1, input_batch)
+                bilirubin_prediction = _run_with_model(
+                    self.model_stage1, img_input_batch, feat_input_batch)
                 if time.perf_counter() - started > INFERENCE_TIMEOUT:
-                    raise TimeoutError(f"Inference melebihi {INFERENCE_TIMEOUT}s")
+                    raise TimeoutError(f"Inference exceeded {INFERENCE_TIMEOUT}s")
                 model_used = "stage1_only"
 
             self.last_inference_time_ms = round((time.perf_counter() - started) * 1000.0, 2)
@@ -406,6 +526,8 @@ class BilirubinPredictor:
                 "bilirubin_prediction": bilirubin_prediction,
                 "model_backend": self.model_backend,
                 "model_mode": self.model_mode,
+                "active_model_id": self.active_model_id,
+                "active_model_name": self.active_model_name,
                 "model_used": model_used,
                 "inference_time_ms": self.last_inference_time_ms,
                 "preprocessing_mode": preprocess_mode,
@@ -417,12 +539,15 @@ class BilirubinPredictor:
                 "gatecheck_warnings": preprocess_diag.get("gatecheck_warnings", []),
                 "palette_detected": preprocess_diag.get("palette_detected", False),
                 "error": None,
+                "_is_multi_input": is_multi,
             }
 
             if return_diagnostics:
                 result["diagnostics"] = preprocess_diag
                 result["metrics"] = preprocess_diag.get("metrics", {})
                 result["_processed_image_rgb"] = preprocessed_rgb
+                if feat_input_batch is not None:
+                    result["_color_features"] = color_features.tolist() if color_features is not None else []
 
             return bilirubin_prediction, result
 
@@ -434,6 +559,8 @@ class BilirubinPredictor:
                 "bilirubin_prediction": None,
                 "model_backend": self.model_backend,
                 "model_mode": self.model_mode,
+                "active_model_id": self.active_model_id,
+                "active_model_name": self.active_model_name,
             }
 
     def predict_from_file(
@@ -474,6 +601,8 @@ class BilirubinPredictor:
         return {
             "requested_backend": self.requested_model_backend,
             "model_backend": self.model_backend,
+            "active_model_id": self.active_model_id,
+            "active_model_name": self.active_model_name,
             "requested_model_mode": self.requested_model_mode,
             "model_mode": self.model_mode,
             "tflite_runtime": self.tflite_runtime,
@@ -483,6 +612,9 @@ class BilirubinPredictor:
             "using_stage2": model_mode_uses_stage2(self.model_mode) and self.model_stage2 is not None,
             "stage1_path": self.model_stage1_path if self.model_backend == "keras" else self.tflite_stage1_path,
             "stage2_path": self.model_stage2_path if self.model_backend == "keras" else self.tflite_stage2_path,
+            "active_model_path": self.model_stage1_path if self.model_backend == "keras" else self.tflite_stage1_path,
+            "preprocess_profile": self.preprocess_profile,
+            "yolo_detector_path": str(self.yolo_detector_path) if self.yolo_detector_path else None,
             "target_size": self.target_size,
             "last_inference_time_ms": self.last_inference_time_ms,
             "error": self.last_error,

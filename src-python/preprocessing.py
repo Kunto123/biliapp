@@ -10,6 +10,8 @@ Handles:
   5. Quality assessment and mode selection
 """
 
+import json
+import zipfile
 import cv2
 import numpy as np
 import pandas as pd
@@ -242,6 +244,209 @@ def blur_score_laplacian(image_rgb: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+# ===== YOLO TRAINING-FLOW DETECTION =====
+
+YOLO_DEFAULT_CONFIDENCE = 0.83
+YOLO_DEFAULT_IOU = 0.45
+
+
+def _resolve_tflite_interpreter_class():
+    try:
+        from tflite_runtime.interpreter import Interpreter
+
+        return Interpreter
+    except ImportError:
+        import tensorflow as tf
+
+        Interpreter = getattr(tf.lite, "Interpreter", None)
+        if Interpreter is None:
+            from tensorflow.lite.python.interpreter import Interpreter
+        return Interpreter
+
+
+def _read_yolo_metadata(model_path: Path) -> Dict:
+    try:
+        with zipfile.ZipFile(model_path) as zf:
+            if "metadata.json" not in zf.namelist():
+                return {}
+            return json.loads(zf.read("metadata.json").decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _letterbox_rgb(image_rgb: np.ndarray, size: int) -> Tuple[np.ndarray, float, float, float]:
+    h, w = image_rgb.shape[:2]
+    ratio = min(size / max(w, 1), size / max(h, 1))
+    new_w = int(round(w * ratio))
+    new_h = int(round(h * ratio))
+    resized = cv2.resize(image_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((size, size, 3), 114, dtype=np.uint8)
+    pad_x = (size - new_w) / 2.0
+    pad_y = (size - new_h) / 2.0
+    x0 = int(round(pad_x - 0.1))
+    y0 = int(round(pad_y - 0.1))
+    canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
+    return canvas, ratio, pad_x, pad_y
+
+
+def _nms_indices(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> List[int]:
+    if len(boxes) == 0:
+        return []
+    order = scores.argsort()[::-1]
+    keep: List[int] = []
+    while order.size > 0:
+        i = int(order[0])
+        keep.append(i)
+        if order.size == 1:
+            break
+        xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
+        yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
+        xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
+        yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
+        inter_w = np.maximum(0.0, xx2 - xx1)
+        inter_h = np.maximum(0.0, yy2 - yy1)
+        inter = inter_w * inter_h
+        area_i = (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1])
+        area_rest = (boxes[order[1:], 2] - boxes[order[1:], 0]) * (
+            boxes[order[1:], 3] - boxes[order[1:], 1]
+        )
+        union = np.maximum(area_i + area_rest - inter, 1e-6)
+        remaining = np.where((inter / union) <= iou_threshold)[0]
+        order = order[remaining + 1]
+    return keep
+
+
+class YoloTFLiteDetector:
+    """Small YOLO TFLite wrapper for the training preprocessing path."""
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        confidence: float = YOLO_DEFAULT_CONFIDENCE,
+        iou: float = YOLO_DEFAULT_IOU,
+    ):
+        self.model_path = Path(model_path)
+        self.confidence = float(confidence)
+        self.iou = float(iou)
+        self.metadata = _read_yolo_metadata(self.model_path)
+        names = self.metadata.get("names", {})
+        self.names = {int(k): str(v) for k, v in names.items()} if isinstance(names, dict) else {}
+        self.input_size = int((self.metadata.get("imgsz") or [640])[0])
+        self.interpreter = None
+        self.last_error: Optional[str] = None
+
+    def _ensure_loaded(self) -> bool:
+        if self.interpreter is not None:
+            return True
+        if not self.model_path.exists():
+            self.last_error = f"YOLO detector not found: {self.model_path}"
+            return False
+        try:
+            Interpreter = _resolve_tflite_interpreter_class()
+            self.interpreter = Interpreter(model_path=str(self.model_path))
+            self.interpreter.allocate_tensors()
+            input_details = self.interpreter.get_input_details()
+            if input_details:
+                shape = input_details[0].get("shape")
+                if shape is not None and len(shape) >= 3:
+                    self.input_size = int(shape[1])
+            self.last_error = None
+            return True
+        except Exception as exc:
+            self.last_error = f"Failed to load YOLO detector: {exc}"
+            self.interpreter = None
+            return False
+
+    def detect(self, image_rgb: np.ndarray) -> List[Dict]:
+        if not self._ensure_loaded():
+            return []
+
+        assert self.interpreter is not None
+        input_details = self.interpreter.get_input_details()
+        output_details = self.interpreter.get_output_details()
+        input_info = input_details[0]
+        input_size = int(input_info["shape"][1])
+
+        padded, ratio, pad_x, pad_y = _letterbox_rgb(image_rgb, input_size)
+        model_input = padded.astype(np.float32) / 255.0
+        model_input = np.expand_dims(model_input, axis=0)
+
+        input_dtype = input_info["dtype"]
+        if input_dtype != np.float32:
+            scale, zero_point = input_info.get("quantization", (0.0, 0))
+            if scale and scale > 0:
+                model_input = np.round(model_input / scale + zero_point)
+            model_input = np.clip(model_input, np.iinfo(input_dtype).min, np.iinfo(input_dtype).max)
+            model_input = model_input.astype(input_dtype)
+        else:
+            model_input = model_input.astype(np.float32)
+
+        self.interpreter.set_tensor(input_info["index"], model_input)
+        self.interpreter.invoke()
+        output = self.interpreter.get_tensor(output_details[0]["index"])
+        pred = np.squeeze(output)
+        if pred.ndim != 2:
+            self.last_error = f"Unexpected YOLO output shape: {output.shape}"
+            return []
+        if pred.shape[0] < pred.shape[1]:
+            pred = pred.T
+        if pred.shape[1] < 5:
+            self.last_error = f"Unexpected YOLO output channels: {pred.shape}"
+            return []
+
+        boxes_xywh = pred[:, :4].astype(np.float32)
+        scores_by_class = pred[:, 4:].astype(np.float32)
+        class_ids = np.argmax(scores_by_class, axis=1)
+        scores = np.max(scores_by_class, axis=1)
+        keep_mask = scores >= self.confidence
+        if not np.any(keep_mask):
+            self.last_error = "No YOLO detections above confidence threshold"
+            return []
+
+        boxes_xywh = boxes_xywh[keep_mask]
+        class_ids = class_ids[keep_mask]
+        scores = scores[keep_mask]
+
+        if np.nanmax(boxes_xywh) <= 2.0:
+            boxes_xywh[:, [0, 2]] *= input_size
+            boxes_xywh[:, [1, 3]] *= input_size
+
+        xyxy = np.zeros_like(boxes_xywh, dtype=np.float32)
+        xyxy[:, 0] = boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2.0
+        xyxy[:, 1] = boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2.0
+        xyxy[:, 2] = boxes_xywh[:, 0] + boxes_xywh[:, 2] / 2.0
+        xyxy[:, 3] = boxes_xywh[:, 1] + boxes_xywh[:, 3] / 2.0
+
+        xyxy[:, [0, 2]] = (xyxy[:, [0, 2]] - pad_x) / max(ratio, 1e-6)
+        xyxy[:, [1, 3]] = (xyxy[:, [1, 3]] - pad_y) / max(ratio, 1e-6)
+        h, w = image_rgb.shape[:2]
+        xyxy[:, [0, 2]] = np.clip(xyxy[:, [0, 2]], 0, w - 1)
+        xyxy[:, [1, 3]] = np.clip(xyxy[:, [1, 3]], 0, h - 1)
+
+        detections: List[Dict] = []
+        for cls in np.unique(class_ids):
+            cls_mask = class_ids == cls
+            cls_boxes = xyxy[cls_mask]
+            cls_scores = scores[cls_mask]
+            cls_indexes = np.where(cls_mask)[0]
+            for local_idx in _nms_indices(cls_boxes, cls_scores, self.iou):
+                idx = int(cls_indexes[local_idx])
+                x1, y1, x2, y2 = xyxy[idx].tolist()
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                cls_id = int(class_ids[idx])
+                detections.append({
+                    "class_id": cls_id,
+                    "name": self.names.get(cls_id, str(cls_id)),
+                    "confidence": float(scores[idx]),
+                    "box": [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))],
+                })
+
+        detections.sort(key=lambda item: item["confidence"], reverse=True)
+        self.last_error = None
+        return detections
+
+
 # ===== WHITE BALANCE =====
 
 def extract_gray_patch_summary(image_rgb: np.ndarray, roi_config: Dict, gray_patch_names: List[str]) -> pd.DataFrame:
@@ -325,6 +530,30 @@ def apply_channel_gains(image_rgb: np.ndarray, gains: np.ndarray) -> np.ndarray:
     corrected[..., 2] *= gains[2]
     corrected = np.clip(corrected, 0, 255).astype(np.uint8)
     return corrected
+
+
+def white_balance_from_gray_patch_means(image_rgb: np.ndarray, gray_patches_rgb: List[np.ndarray]) -> np.ndarray:
+    """Match notebook training WB: target each channel to the gray-patch average."""
+    if not gray_patches_rgb:
+        return gray_world_white_balance(image_rgb)
+    avg_gray = np.mean(np.asarray(gray_patches_rgb, dtype=np.float32), axis=0)
+    target = float(np.mean(avg_gray))
+    gains = np.ones(3, dtype=np.float32)
+    for channel in range(3):
+        if avg_gray[channel] > 1:
+            gains[channel] = target / avg_gray[channel]
+    return apply_channel_gains(image_rgb, gains)
+
+
+def gray_world_white_balance(image_rgb: np.ndarray) -> np.ndarray:
+    """Fallback used by the notebook when YOLO gray patches are missing."""
+    avg = np.mean(image_rgb.astype(np.float32), axis=(0, 1))
+    target = float(np.mean(avg))
+    gains = np.ones(3, dtype=np.float32)
+    for channel in range(3):
+        if avg[channel] > 1:
+            gains[channel] = target / avg[channel]
+    return apply_channel_gains(image_rgb, gains)
 
 
 def gray_neutrality_score(gray_obs_df: pd.DataFrame) -> float:
@@ -511,19 +740,150 @@ class BilirubinPreprocessor:
         roi_config: Dict = None,
         reference_palette_df: pd.DataFrame = None,
         gray_reference_df: pd.DataFrame = None,
+        yolo_detector_path: Optional[str] = None,
+        yolo_confidence: float = YOLO_DEFAULT_CONFIDENCE,
+        yolo_iou: float = YOLO_DEFAULT_IOU,
     ):
         self.roi_config = ROI_CONFIG if roi_config is None else roi_config
         self.reference_palette_df = REFERENCE_PALETTE_DF if reference_palette_df is None else reference_palette_df
         self.gray_reference_df = GRAY_PATCHES_REFERENCE_DF if gray_reference_df is None else gray_reference_df
+        self.yolo_detector_path = Path(yolo_detector_path) if yolo_detector_path else None
+        self.yolo_confidence = float(yolo_confidence)
+        self.yolo_iou = float(yolo_iou)
+        self._yolo_detector: Optional[YoloTFLiteDetector] = None
         self.last_error = None
+
+    def _get_yolo_detector(self) -> Optional[YoloTFLiteDetector]:
+        if self.yolo_detector_path is None:
+            self.last_error = "YOLO detector path is not configured"
+            return None
+        if self._yolo_detector is None:
+            self._yolo_detector = YoloTFLiteDetector(
+                self.yolo_detector_path,
+                confidence=self.yolo_confidence,
+                iou=self.yolo_iou,
+            )
+        return self._yolo_detector
+
+    def preprocess_training_flow(
+        self,
+        image_bgr: np.ndarray,
+        return_diagnostics: bool = False,
+    ) -> Tuple[Optional[np.ndarray], str, Dict]:
+        """
+        Training-compatible path from cnnbili.ipynb:
+        YOLO detect skin_roi + gray patches, WB-only, crop skin ROI.
+        """
+        diagnostics: Dict = {
+            "error": None,
+            "selected_mode": "yolo_wb_skin_crop",
+            "quality_label": "unknown",
+            "quality_score": 0,
+            "quality_flags": {},
+            "gatecheck_passed": False,
+            "gatecheck_errors": [],
+            "gatecheck_warnings": [],
+            "palette_detected": False,
+            "metrics": {},
+        }
+
+        def fail(mode: str, message: str) -> Tuple[None, str, Dict]:
+            self.last_error = message
+            diagnostics.update({
+                "error": message,
+                "selected_mode": mode,
+                "quality_label": "failed",
+                "quality_score": 0,
+                "gatecheck_passed": False,
+            })
+            diagnostics["gatecheck_errors"].append(message)
+            return None, mode, diagnostics if return_diagnostics else {"error": message}
+
+        try:
+            detector = self._get_yolo_detector()
+            if detector is None:
+                return fail("yolo_unavailable", self.last_error or "YOLO detector unavailable")
+
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            detections = detector.detect(image_rgb)
+            if not detections:
+                return fail("yolo_no_detection", detector.last_error or "YOLO detector found no usable ROI")
+
+            skin_detections = [d for d in detections if d["name"] == "skin_roi"]
+            if not skin_detections:
+                return fail("skin_roi_not_detected", "YOLO skin_roi tidak terdeteksi")
+            skin = max(skin_detections, key=lambda item: item["confidence"])
+
+            gray_detections = [
+                d for d in detections
+                if "grey" in d["name"].lower() or "gray" in d["name"].lower()
+            ]
+            gray_patches = []
+            for det in gray_detections:
+                x1, y1, x2, y2 = det["box"]
+                patch = image_rgb[y1:y2, x1:x2]
+                if patch.size > 0:
+                    gray_patches.append(np.mean(patch, axis=(0, 1)))
+
+            gatecheck_warnings: List[str] = []
+            if gray_patches:
+                wb_rgb = white_balance_from_gray_patch_means(image_rgb, gray_patches)
+                mode = "yolo_wb_skin_crop"
+                quality_label = "high"
+                quality_score = 100
+            else:
+                wb_rgb = gray_world_white_balance(image_rgb)
+                mode = "yolo_grayworld_skin_crop"
+                quality_label = "medium"
+                quality_score = 75
+                gatecheck_warnings.append("Gray patch YOLO tidak terdeteksi; memakai gray-world fallback.")
+
+            x1, y1, x2, y2 = skin["box"]
+            skin_crop = wb_rgb[y1:y2, x1:x2]
+            if skin_crop.size == 0:
+                return fail("skin_roi_empty", "YOLO skin_roi kosong setelah crop")
+
+            diagnostics.update({
+                "selected_mode": mode,
+                "quality_label": quality_label,
+                "quality_score": quality_score,
+                "gatecheck_passed": True,
+                "gatecheck_warnings": gatecheck_warnings,
+                "quality_flags": {
+                    "yolo_detector_loaded": True,
+                    "skin_roi_detected": True,
+                    "gray_patches_detected": bool(gray_patches),
+                    "white_balance_only": True,
+                    "palette_correction_used": False,
+                },
+                "metrics": {
+                    "skin_roi_confidence": float(skin["confidence"]),
+                    "gray_patch_count": int(len(gray_patches)),
+                    "detections": int(len(detections)),
+                },
+                "skin_roi_box": skin["box"],
+                "gray_patch_boxes": [d["box"] for d in gray_detections],
+            })
+            self.last_error = None
+            return skin_crop, mode, diagnostics if return_diagnostics else {}
+
+        except Exception as exc:
+            return fail("yolo_training_flow_error", str(exc))
 
     def preprocess_image(
         self,
         image_bgr: np.ndarray,
-        return_diagnostics: bool = False
+        return_diagnostics: bool = False,
+        use_palette_correction: bool = True,
     ) -> Tuple[Optional[np.ndarray], str, Dict]:
         """
         Complete preprocessing pipeline: detect card -> align -> assess quality -> apply corrections.
+        
+        Args:
+            image_bgr: Input image in BGR format
+            return_diagnostics: Whether to return detailed diagnostics
+            use_palette_correction: If False, skip CCM-like palette correction (WB-only output).
+                                    Set False for V21 multi-input model compatibility.
         
         Returns:
             (preprocessed_image_rgb or None, applied_mode_string, diagnostics_dict)
@@ -660,21 +1020,27 @@ class BilirubinPreprocessor:
             )
             patch_mae_wb = float(err_wb["mean_abs_err_rgb"].mean())
 
-            # White balance + palette
-            palette_transform, _ = fit_palette_transform_regularized(
-                extract_patch_medians(wb_rgb, self.roi_config, COLOR_PATCHES),
-                self.reference_palette_df,
-                correction_strength=PALETTE_CORRECTION_STRENGTH
-            )
-            final_rgb = apply_palette_transform(wb_rgb, palette_transform)
-            gray_final = extract_gray_patch_summary(final_rgb, self.roi_config, GRAY_PATCHES)
-            gray_std_final = gray_neutrality_score(gray_final)
+            # White balance + palette correction (optional)
+            if use_palette_correction:
+                palette_transform, _ = fit_palette_transform_regularized(
+                    extract_patch_medians(wb_rgb, self.roi_config, COLOR_PATCHES),
+                    self.reference_palette_df,
+                    correction_strength=PALETTE_CORRECTION_STRENGTH
+                )
+                final_rgb = apply_palette_transform(wb_rgb, palette_transform)
+                gray_final = extract_gray_patch_summary(final_rgb, self.roi_config, GRAY_PATCHES)
+                gray_std_final = gray_neutrality_score(gray_final)
 
-            err_final = evaluate_patch_error(
-                extract_patch_medians(final_rgb, self.roi_config, COLOR_PATCHES),
-                self.reference_palette_df
-            )
-            patch_mae_final = float(err_final["mean_abs_err_rgb"].mean())
+                err_final = evaluate_patch_error(
+                    extract_patch_medians(final_rgb, self.roi_config, COLOR_PATCHES),
+                    self.reference_palette_df
+                )
+                patch_mae_final = float(err_final["mean_abs_err_rgb"].mean())
+            else:
+                # Skip palette correction: WB-only output (for V21 multi-input model)
+                final_rgb = wb_rgb
+                gray_std_final = gray_std_wb
+                patch_mae_final = patch_mae_wb
 
             metrics.update({
                 "gray_std_raw": gray_std_raw,
@@ -686,7 +1052,17 @@ class BilirubinPreprocessor:
             })
 
             # Step 4: Choose calibration mode
-            selected_mode, quality_label, quality_score, calibration_flags = choose_calibration_mode(metrics)
+            if use_palette_correction:
+                selected_mode, quality_label, quality_score, calibration_flags = choose_calibration_mode(metrics)
+            else:
+                # Without palette correction: choose between raw and WB-only
+                if gray_std_wb < gray_std_raw - 0.5:
+                    selected_mode = "white_balance_only"
+                else:
+                    selected_mode = "raw_aligned"
+                quality_label = "high"  # assume high if gatecheck passed
+                quality_score = 75
+                calibration_flags = {}
             quality_flags.update(calibration_flags)
             if quality_label == "low":
                 gatecheck_warnings.append("Kualitas foto rendah meski lolos gatecheck.")
@@ -696,8 +1072,8 @@ class BilirubinPreprocessor:
                 output_rgb = raw_rgb
             elif selected_mode == "white_balance_only":
                 output_rgb = wb_rgb
-            else:  # wb_plus_palette
-                output_rgb = final_rgb
+            else:  # wb_plus_palette — fallback to wb when palette disabled
+                output_rgb = wb_rgb
 
             diagnostics = {
                 "error": None,
@@ -737,3 +1113,77 @@ class BilirubinPreprocessor:
         except Exception as e:
             self.last_error = str(e)
             return None, "error", {"error": self.last_error}
+
+
+# ── Color Feature Extraction (for V21 multi-input model) ────────────────────
+
+def extract_color_features(img_rgb: np.ndarray) -> np.ndarray:
+    """
+    Extract 24 color features from a skin ROI image.
+    
+    This function mirrors the feature extraction used in the V21 notebook training
+    pipeline (cnnbili.ipynb Cell 8). It provides explicit color information that
+    complements CNN visual features for bilirubin prediction.
+    
+    Args:
+        img_rgb: numpy array (H, W, 3) in RGB format, 0-255 range.
+                 Should be a skin ROI crop (already WB-corrected, resized to 224x224).
+    
+    Returns:
+        numpy float32 array of 24 values:
+        - [0:3]   RGB mean
+        - [3:6]   RGB std
+        - [6:9]   LAB mean  (L: 0-100, A/B: 1-255; B channel = yellow-blue axis)
+        - [9:12]  LAB std
+        - [12:15] HSV mean  (H: 0-180, S/V: 0-255)
+        - [15:18] HSV std
+        - [18:23] RGB ratios (R/G, R/B, G/B, (R-G)/B, (R+B)/G)
+        - [23]    spatial cy (Y-center of bright region, 0-1)
+    """
+    import cv2
+    import numpy as np
+
+    img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    img_hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+
+    # RGB statistics (6 features)
+    rgb_mean = np.mean(img_rgb, axis=(0, 1))
+    rgb_std  = np.std(img_rgb, axis=(0, 1))
+
+    # LAB statistics (6 features) — B channel encodes yellow-blue
+    lab_mean = np.mean(img_lab, axis=(0, 1))
+    lab_std  = np.std(img_lab, axis=(0, 1))
+
+    # HSV statistics (6 features) — Hue encodes dominant color
+    hsv_mean = np.mean(img_hsv, axis=(0, 1))
+    hsv_std  = np.std(img_hsv, axis=(0, 1))
+
+    # RGB ratios (5 features) — discriminative for yellow-ness
+    r, g, b = float(rgb_mean[0]), float(rgb_mean[1]), float(rgb_mean[2])
+    eps = 1e-6
+    ratio_rg   = r / (g + eps)
+    ratio_rb   = r / (b + eps)
+    ratio_gb   = g / (b + eps)
+    ratio_rg_b = (r - g) / (b + eps)   # negative = more yellow dominant
+    ratio_rb_g = (r + b) / (g + eps)
+
+    # Spatial feature (1): Y-center of brightest skin region
+    v_channel = img_hsv[:, :, 2]
+    bright_thresh = np.percentile(v_channel, 75)
+    bright_mask = v_channel > bright_thresh
+    if np.any(bright_mask):
+        ys = np.where(bright_mask)[0]
+        spatial_cy = float(np.mean(ys)) / img_rgb.shape[0]
+    else:
+        spatial_cy = 0.5
+
+    features = np.concatenate([
+        rgb_mean, rgb_std,       # 6
+        lab_mean, lab_std,       # 6
+        hsv_mean, hsv_std,       # 6
+        [ratio_rg, ratio_rb, ratio_gb, ratio_rg_b, ratio_rb_g],  # 5
+        [spatial_cy],            # 1
+    ]).astype(np.float32)
+
+    assert features.shape[0] == 24, f"Expected 24 features, got {features.shape[0]}"
+    return features

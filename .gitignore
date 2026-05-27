@@ -17,6 +17,7 @@ data/offline_sync.db-*
 .env
 .env.*
 !.env.example
+.hermes
 
 # Python
 __pycache__/

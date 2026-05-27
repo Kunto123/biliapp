@@ -133,10 +133,40 @@ def get_camera_settings() -> dict[str, Any]:
 
 def save_camera_settings(settings: dict[str, Any]) -> dict[str, Any]:
     global _runtime_overrides
-    normalized = normalize_camera_settings(settings)
-    # Simpan di memori saja — tidak ada file JSON yang dibuat
+    # Separate camera settings from extra keys (like active_model)
+    camera_keys = {"camera_type", "camera_index", "capture_resolution", "preview_resolution", "fps", "min_fps", "jpeg_quality", "rotation"}
+    camera_settings = {k: v for k, v in settings.items() if k in camera_keys}
+    extra_settings = {k: v for k, v in settings.items() if k not in camera_keys}
+
+    normalized = normalize_camera_settings(camera_settings)
     _runtime_overrides = dict(normalized)
+
+    # Save extra keys (like active_model) to a separate JSON file
+    if extra_settings:
+        import json as _json
+        extra_path = DEFAULT_SETTINGS_PATH.parent / "model_settings.json"
+        existing = {}
+        if extra_path.exists():
+            try:
+                existing = _json.loads(extra_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        existing.update(extra_settings)
+        extra_path.write_text(_json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+
     return normalized
+
+
+def get_model_settings() -> dict[str, Any]:
+    """Return extra settings like active_model from model_settings.json."""
+    import json as _json
+    extra_path = DEFAULT_SETTINGS_PATH.parent / "model_settings.json"
+    if extra_path.exists():
+        try:
+            return _json.loads(extra_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
 
 
 def resolution_tuple(value: dict[str, int]) -> tuple[int, int]:

@@ -35,12 +35,15 @@ from camera_manager import CameraPreviewStream, CameraType, scan_opencv_devices
 from camera_settings import (
     DEFAULT_SETTINGS_PATH,
     get_camera_settings,
+    get_model_settings,
     load_camera_settings,
     normalize_camera_settings,
     resolution_tuple,
     save_camera_settings,
 )
 from main_pipeline import BilirubinPredictionPipeline
+from prediction_engine import BilirubinPredictor
+import config as config_mod
 from config import (
     API_BIND_HOST,
     BILIRUBIN_DEVICE_ID,
@@ -65,9 +68,9 @@ from config import (
     CAMERA_CAPTURE_TIMEOUT_MS,
     GATECHECK_MIN_BLUR_SCORE,
     MODEL_BACKEND,
+    MODEL_INPUT_SIZE,
     MODEL_MODE,
-    MODEL_STAGE1_TFLITE_PATH,
-    MODEL_STAGE2_TFLITE_PATH,
+    YOLO_DETECTOR_PATH,
     OFFLINE_SYNC_DB_PATH,
     PREVIEW_POLL_MS,
     SUPABASE_KEY,
@@ -336,8 +339,77 @@ def _age_hours(baby: dict, captured_at: str) -> Optional[float]:
 
 def _result_model_version(result: dict) -> str:
     backend = result.get("model_backend") or MODEL_BACKEND
+    active_model_id = result.get("active_model_id")
+    if active_model_id:
+        return f"bilirubin_{active_model_id}_{backend}"
     mode = result.get("model_mode") or result.get("model_used") or MODEL_MODE
     return f"bilirubin_v1_{backend}_{mode}"
+
+
+def _model_backend_for_info(model_info: dict) -> str:
+    return "keras" if model_info.get("format") == "keras" else "tflite"
+
+
+def _select_model_info(model_id: Optional[str] = None) -> tuple[str, Optional[dict], list[dict]]:
+    available = config_mod.get_available_models()
+    if not available:
+        return "", None, available
+
+    selected_id = (model_id or "").strip().lower()
+    if not selected_id:
+        model_settings = get_model_settings()
+        selected_id = str(model_settings.get("active_model") or "").strip().lower()
+    if not selected_id:
+        selected_id = str(config_mod._ACTIVE_MODEL_OVERRIDE or "").strip().lower()
+    if not selected_id:
+        selected_id = "v19"
+
+    info = next((m for m in available if m["id"] == selected_id), None)
+    if info is None:
+        info = next((m for m in available if m["id"] == "v19"), available[0])
+        selected_id = info["id"]
+    return selected_id, info, available
+
+
+def _build_predictor_for_model(model_info: dict) -> BilirubinPredictor:
+    model_path = str(model_info["path"])
+    backend = _model_backend_for_info(model_info)
+    return BilirubinPredictor(
+        model_stage1_path=model_path,
+        model_stage2_path=None,
+        use_stage2=False,
+        model_mode="stage1",
+        target_size=MODEL_INPUT_SIZE,
+        model_backend=backend,
+        tflite_stage1_path=model_path if backend == "tflite" else None,
+        tflite_stage2_path=None,
+        allow_backend_fallback=False,
+        preprocess_profile=model_info.get("preprocess_profile", "yolo_wb_skin_crop"),
+        yolo_detector_path=str(YOLO_DETECTOR_PATH),
+        active_model_id=model_info["id"],
+        active_model_name=model_info["name"],
+    )
+
+
+def _build_pipeline_for_model(model_info: dict) -> BilirubinPredictionPipeline:
+    model_path = str(model_info["path"])
+    backend = _model_backend_for_info(model_info)
+    return BilirubinPredictionPipeline(
+        model_stage1_path=model_path,
+        model_stage2_path=None,
+        use_stage2=False,
+        model_mode="stage1",
+        logs_dir=str(BASE_DIR / "logs"),
+        images_dir=str(BASE_DIR / "data" / "captures"),
+        model_backend=backend,
+        tflite_stage1_path=model_path if backend == "tflite" else None,
+        tflite_stage2_path=None,
+        allow_backend_fallback=False,
+        preprocess_profile=model_info.get("preprocess_profile", "yolo_wb_skin_crop"),
+        yolo_detector_path=str(YOLO_DETECTOR_PATH),
+        active_model_id=model_info["id"],
+        active_model_name=model_info["name"],
+    )
 
 
 def _active_baby_payload() -> dict:
@@ -591,12 +663,9 @@ def _enqueue_capture_result(result: dict, baby: dict) -> None:
 @app.on_event("startup")
 async def startup():
     global pipeline, offline_store, sync_service, network_manager
-    m1 = BASE_DIR / "best_model_stage1.keras"
-    m2 = BASE_DIR / "best_model_stage2.keras"
-    stage2_available = m2.exists() or MODEL_STAGE2_TFLITE_PATH.exists()
     print(f"[api] BASE_DIR : {BASE_DIR}")
-    print(f"[api] Stage1   : {m1} (exists={m1.exists()})")
-    print(f"[api] Stage2   : {m2} (keras={m2.exists()}, tflite={MODEL_STAGE2_TFLITE_PATH.exists()})")
+    print(f"[api] MODELS   : {config_mod.MODELS_DIR} (exists={config_mod.MODELS_DIR.exists()})")
+    print(f"[api] YOLO     : {YOLO_DETECTOR_PATH} (exists={YOLO_DETECTOR_PATH.exists()})")
     try:
         offline_store = OfflineStore(OFFLINE_SYNC_DB_PATH)
         network_manager = NetworkManager(
@@ -660,18 +729,25 @@ async def startup():
         print(f"[api] Offline sync init failed: {e}")
 
     try:
-        pipeline = BilirubinPredictionPipeline(
-            model_stage1_path=str(m1),
-            model_stage2_path=str(m2) if m2.exists() else None,
-            use_stage2=USE_STAGE2 and stage2_available,
-            model_mode=MODEL_MODE,
-            logs_dir=str(BASE_DIR / "logs"),
-            images_dir=str(BASE_DIR / "data" / "captures"),
-            model_backend=MODEL_BACKEND,
-            tflite_stage1_path=str(MODEL_STAGE1_TFLITE_PATH),
-            tflite_stage2_path=str(MODEL_STAGE2_TFLITE_PATH),
-        )
-        print("[api] Pipeline initialized")
+        # ── Model Selection ────────────────────────────────────────────
+        # Priority: saved setting > env var > "v19" default
+        # Saved setting stored in data/model_settings.json as "active_model"
+        active_model_id, _model_info, _available = _select_model_info()
+        if _model_info is None:
+            print("[api] Pipeline init failed: no selectable regressor models in models/")
+        else:
+            pipeline = _build_pipeline_for_model(_model_info)
+            model_status = pipeline.prediction_engine.get_model_info()
+            if not model_status.get("stage1_loaded"):
+                print(f"[api] WARNING: active model failed to load: {model_status.get('error')}")
+            print(
+                f"[api] Pipeline initialized "
+                f"(active_model={active_model_id}, file={_model_info['filename']}, "
+                f"backend={_model_backend_for_info(_model_info)})"
+            )
+            if active_model_id != get_model_settings().get("active_model"):
+                save_camera_settings({"active_model": active_model_id})
+        print(f"[api] Selectable models: {[m['id'] for m in _available]}")
     except Exception as e:
         print(f"[api] Pipeline init failed: {e}")
 
@@ -729,6 +805,8 @@ async def get_status():
         "configured_model_mode": MODEL_MODE,
         "model_mode": status.get("models", {}).get("model_mode", MODEL_MODE),
         "use_stage2": status.get("models", {}).get("using_stage2", USE_STAGE2),
+        "active_model_id": status.get("models", {}).get("active_model_id"),
+        "active_model_name": status.get("models", {}).get("active_model_name"),
     }
     status["baby_profile"] = _active_baby_payload()
     status["sync"] = sync_service.status() if sync_service is not None else {
@@ -1315,6 +1393,7 @@ async def get_stats(
 class ModelSettings(BaseModel):
     model_mode: Optional[str] = None
     use_stage2: Optional[bool] = None
+    model_id: Optional[str] = None
 
 
 @app.post("/api/settings/model")
@@ -1322,6 +1401,9 @@ async def update_model(settings: ModelSettings):
     if pipeline is None:
         return {"success": False, "error": "Pipeline tidak diinisialisasi"}
     try:
+        if settings.model_id:
+            return await set_model_type(ModelTypePayload(model_id=settings.model_id))
+
         model_mode = settings.model_mode
         if model_mode is None and settings.use_stage2 is not None:
             model_mode = "stage2" if settings.use_stage2 else "stage1"
@@ -1335,6 +1417,79 @@ async def update_model(settings: ModelSettings):
         return {"success": True, "model_mode": info["model_mode"], "use_stage2": info["using_stage2"], "models": info}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+class ModelTypePayload(BaseModel):
+    model_id: str
+
+
+@app.get("/api/settings/model-type")
+async def get_model_type():
+    """Return available models and currently active model."""
+    available = config_mod.get_available_models()
+    current_id = ""
+    current_model = None
+    if pipeline is not None and getattr(pipeline, "prediction_engine", None) is not None:
+        info = pipeline.prediction_engine.get_model_info()
+        current_id = info.get("active_model_id") or ""
+        current_model = next((m for m in available if m["id"] == current_id), None)
+    if not current_id:
+        current_id, current_model, available = _select_model_info()
+    return {
+        "success": True,
+        "available": available,
+        "active_model_id": current_id,
+        "active_model": current_model,
+    }
+
+
+@app.post("/api/settings/model-type")
+async def set_model_type(payload: ModelTypePayload):
+    """Set active model by model_id. Saved to model_settings.json (persists across restarts)."""
+    global pipeline
+    available = config_mod.get_available_models()
+    available_ids = [m["id"] for m in available]
+    if payload.model_id not in available_ids:
+        return {"success": False, "error": f"Model '{payload.model_id}' tidak ditemukan", "available": available}
+
+    _info = next((m for m in available if m["id"] == payload.model_id), None)
+    try:
+        if pipeline is None:
+            new_pipeline = _build_pipeline_for_model(_info)
+            model_status = new_pipeline.prediction_engine.get_model_info()
+            if not model_status.get("stage1_loaded"):
+                new_pipeline.cleanup()
+                return {
+                    "success": False,
+                    "error": model_status.get("error") or "Model gagal dimuat",
+                    "model": _info,
+                    "models": model_status,
+                }
+            pipeline = new_pipeline
+        else:
+            new_predictor = _build_predictor_for_model(_info)
+            model_status = new_predictor.get_model_info()
+            if not model_status.get("stage1_loaded"):
+                return {
+                    "success": False,
+                    "error": model_status.get("error") or "Model gagal dimuat",
+                    "model": _info,
+                    "models": model_status,
+                }
+            pipeline.prediction_engine = new_predictor
+
+        # Save after load succeeds so the default cannot point at a broken model.
+        save_camera_settings({"active_model": payload.model_id})
+        model_status = pipeline.prediction_engine.get_model_info()
+        print(f"[api] Active model set to: {payload.model_id} ({_info['name'] if _info else 'unknown'})")
+        return {
+            "success": True,
+            "active_model_id": payload.model_id,
+            "model": _info,
+            "models": model_status,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "model": _info}
 
 
 @app.post("/api/images/cleanup")

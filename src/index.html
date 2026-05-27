@@ -238,7 +238,7 @@
       <div class="menu-card-bar"></div>
       <div class="menu-card-body">
         <div class="menu-card-title">Pilih Model</div>
-        <div class="menu-card-sub">Stage 1 atau Stage 1+2 untuk inferensi</div>
+        <div class="menu-card-sub">Model default dari folder models</div>
       </div>
       <div class="menu-card-arrow">❯</div>
     </div>
@@ -303,32 +303,9 @@
   </div>
   <div class="content">
     <div class="info-panel" style="margin-bottom:12px">
-      Stage 2 saja: model final hasil fine-tuning<br>
-      Stage 1+2: rata-rata dua model, inferensi lebih lambat
+      Pilih model regresi yang akan dipakai sebagai default inferensi.
     </div>
-    <label class="radio-opt card" style="display:flex; gap:0">
-      <div style="width:5px; background:var(--accent-lt); border-radius:10px 0 0 10px; flex-shrink:0"></div>
-      <div style="display:flex; align-items:center; gap:12px; padding:14px">
-        <input type="radio" name="model-mode" id="radio-stage2" value="stage2" style="accent-color:var(--accent); width:18px; height:18px">
-        <label for="radio-stage2" style="font-size:14px; color:var(--text); cursor:pointer">
-          Stage 2 Saja <span style="color:var(--accent-dk); font-size:12px">(Rekomendasi)</span>
-        </label>
-      </div>
-    </label>
-    <label class="radio-opt card" style="display:flex; gap:0; margin-top:8px">
-      <div style="width:5px; background:var(--accent-lt); border-radius:10px 0 0 10px; flex-shrink:0"></div>
-      <div style="display:flex; align-items:center; gap:12px; padding:14px">
-        <input type="radio" name="model-mode" id="radio-stage1-stage2" value="stage1_stage2_average" style="accent-color:var(--accent); width:18px; height:18px">
-        <label for="radio-stage1-stage2" style="font-size:14px; color:var(--text); cursor:pointer">Stage 1 + Stage 2</label>
-      </div>
-    </label>
-    <label class="radio-opt card" style="display:flex; gap:0; margin-top:8px">
-      <div style="width:5px; background:var(--accent-lt); border-radius:10px 0 0 10px; flex-shrink:0"></div>
-      <div style="display:flex; align-items:center; gap:12px; padding:14px">
-        <input type="radio" name="model-mode" id="radio-stage1" value="stage1" style="accent-color:var(--accent); width:18px; height:18px">
-        <label for="radio-stage1" style="font-size:14px; color:var(--text); cursor:pointer">Stage 1 Saja</label>
-      </div>
-    </label>
+    <div id="model-list"></div>
     <div class="divider" style="margin-top:16px"></div>
     <button class="btn btn-primary" style="width:100%; margin-top:8px" onclick="App.applyModelSettings()">
       Terapkan

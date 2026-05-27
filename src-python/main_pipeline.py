@@ -30,6 +30,7 @@ from config import (
     MODEL_MODE,
     MODEL_STAGE1_TFLITE_PATH,
     MODEL_STAGE2_TFLITE_PATH,
+    YOLO_DETECTOR_PATH,
 )
 from camera_settings import get_camera_settings, resolution_tuple
 
@@ -51,6 +52,11 @@ class BilirubinPredictionPipeline:
         model_backend: str = MODEL_BACKEND,
         tflite_stage1_path: Optional[str] = None,
         tflite_stage2_path: Optional[str] = None,
+        allow_backend_fallback: bool = True,
+        preprocess_profile: str = "yolo_wb_skin_crop",
+        yolo_detector_path: Optional[str] = None,
+        active_model_id: Optional[str] = None,
+        active_model_name: Optional[str] = None,
     ):
         """
         Initialize complete pipeline.
@@ -79,6 +85,11 @@ class BilirubinPredictionPipeline:
             model_backend=model_backend,
             tflite_stage1_path=tflite_stage1_path or str(MODEL_STAGE1_TFLITE_PATH),
             tflite_stage2_path=tflite_stage2_path or str(MODEL_STAGE2_TFLITE_PATH),
+            allow_backend_fallback=allow_backend_fallback,
+            preprocess_profile=preprocess_profile,
+            yolo_detector_path=yolo_detector_path or str(YOLO_DETECTOR_PATH),
+            active_model_id=active_model_id,
+            active_model_name=active_model_name,
         )
         self.logger = PredictionLogger(log_dir=logs_dir, use_csv=True, use_sqlite=False)
         self.storage = ImageStorage(base_dir=images_dir)
@@ -130,7 +141,9 @@ class BilirubinPredictionPipeline:
             "palette_detected": False,
             "quality_flags": {},
             "model_backend": self.prediction_engine.model_backend,
-            "model_mode": self.prediction_engine.model_mode,
+            "model_mode": getattr(self.prediction_engine, "model_mode", None),
+            "active_model_id": getattr(self.prediction_engine, "active_model_id", None),
+            "active_model_name": getattr(self.prediction_engine, "active_model_name", None),
             "model_used": None,
             "inference_time_ms": None,
             "capture_attempt": 1,
@@ -200,7 +213,11 @@ class BilirubinPredictionPipeline:
             quality_score=int(result.get("quality_score") or 0),
             success=bool(result.get("success")),
             error_message=result.get("error"),
-            model_version=f"bilirubin_v1_{result.get('model_backend', self.prediction_engine.model_backend)}",
+            model_version=(
+                f"bilirubin_{result.get('active_model_id')}_{result.get('model_backend', self.prediction_engine.model_backend)}"
+                if result.get("active_model_id")
+                else f"bilirubin_v1_{result.get('model_backend', self.prediction_engine.model_backend)}"
+            ),
             notes=notes,
         )
 
@@ -266,7 +283,9 @@ class BilirubinPredictionPipeline:
                     result["palette_detected"] = pred_info.get("palette_detected", False)
                     result["quality_flags"] = pred_info.get("quality_flags", {})
                     result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
-                    result["model_mode"] = pred_info.get("model_mode", self.prediction_engine.model_mode)
+                    result["model_mode"] = pred_info.get("model_mode", getattr(self.prediction_engine, "model_mode", None))
+                    result["active_model_id"] = pred_info.get("active_model_id", getattr(self.prediction_engine, "active_model_id", None))
+                    result["active_model_name"] = pred_info.get("active_model_name", getattr(self.prediction_engine, "active_model_name", None))
 
                     save_ok, image_path = self._save_capture_if_needed(image_bgr, result, prefix="rejected")
                     log_ok = self._log_capture_result(result, image_path if save_ok else "")
@@ -291,7 +310,9 @@ class BilirubinPredictionPipeline:
                 result["gatecheck_warnings"] = pred_info.get("gatecheck_warnings", [])
                 result["palette_detected"] = pred_info.get("palette_detected", False)
                 result["model_backend"] = pred_info.get("model_backend", self.prediction_engine.model_backend)
-                result["model_mode"] = pred_info.get("model_mode", self.prediction_engine.model_mode)
+                result["model_mode"] = pred_info.get("model_mode", getattr(self.prediction_engine, "model_mode", None))
+                result["active_model_id"] = pred_info.get("active_model_id", getattr(self.prediction_engine, "active_model_id", None))
+                result["active_model_name"] = pred_info.get("active_model_name", getattr(self.prediction_engine, "active_model_name", None))
                 result["model_used"] = pred_info.get("model_used")
                 result["inference_time_ms"] = pred_info.get("inference_time_ms")
                 result["error"] = None
@@ -325,7 +346,9 @@ class BilirubinPredictionPipeline:
             "preprocessing_mode": None,
             "quality_label": None,
             "quality_score": None,
-            "model_mode": self.prediction_engine.model_mode,
+            "model_mode": getattr(self.prediction_engine, "model_mode", None),
+            "active_model_id": getattr(self.prediction_engine, "active_model_id", None),
+            "active_model_name": getattr(self.prediction_engine, "active_model_name", None),
             "error": None,
             "timestamp": datetime.now()
         }
@@ -350,7 +373,9 @@ class BilirubinPredictionPipeline:
             result["preprocessing_mode"] = pred_info.get("preprocessing_mode", "unknown")
             result["quality_label"] = pred_info.get("quality_label", "unknown")
             result["quality_score"] = pred_info.get("quality_score", 0)
-            result["model_mode"] = pred_info.get("model_mode", self.prediction_engine.model_mode)
+            result["model_mode"] = pred_info.get("model_mode", getattr(self.prediction_engine, "model_mode", None))
+            result["active_model_id"] = pred_info.get("active_model_id", getattr(self.prediction_engine, "active_model_id", None))
+            result["active_model_name"] = pred_info.get("active_model_name", getattr(self.prediction_engine, "active_model_name", None))
 
             # Log
             log_ok = self.logger.log_prediction(

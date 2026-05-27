@@ -169,21 +169,143 @@ def _normalize_model_mode(value: str | None, default: str = "stage2") -> str:
 LOGS_DIR = PROJECT_ROOT / "logs"
 IMAGES_DIR = PROJECT_ROOT / "data" / "captures"
 OFFLINE_SYNC_DB_PATH = PROJECT_ROOT / "data" / "offline_sync.db"
-MODELS_DIR = PROJECT_ROOT
+MODELS_DIR = PROJECT_ROOT / "models"
 
 # ===== DEVICE PROFILE =====
 _IS_PI_HW = _is_raspberry_pi_hardware()
 DEVICE_PROFILE = os.getenv("BILIRUBIN_DEVICE", "raspi5" if _IS_PI_HW else "desktop").strip().lower()
 IS_RASPBERRY_PI = DEVICE_PROFILE in {"raspi5", "raspberrypi5", "raspberry_pi_5", "pi5", "raspi", "raspberrypi"} or _IS_PI_HW
 
-# Model paths
+# Model paths (models/ is the runtime source of truth)
 MODEL_STAGE1_PATH = MODELS_DIR / "best_model_stage1.keras"
 MODEL_STAGE2_PATH = MODELS_DIR / "best_model_stage2.keras"
-MODEL_STAGE1_TFLITE_PATH = MODELS_DIR / "models" / "best_model_stage1.tflite"
-MODEL_STAGE2_TFLITE_PATH = MODELS_DIR / "models" / "best_model_stage2.tflite"
+MODEL_STAGE1_TFLITE_PATH = MODELS_DIR / "best_model_stage1.tflite"
+MODEL_STAGE2_TFLITE_PATH = MODELS_DIR / "best_model_stage2.tflite"
+MODEL_V21_PATH = MODELS_DIR / "best_cnn_bilirubin_v21.h5"
+MODEL_V21_TFLITE_PATH = MODELS_DIR / "best_cnn_bilirubin_v21.tflite"
+YOLO_DETECTOR_PATH = Path(
+    os.getenv("BILIRUBIN_YOLO_DETECTOR_PATH", str(MODELS_DIR / "best_int8.tflite"))
+)
 
 # ===== MODEL CONFIGURATION =====
 MODEL_BACKEND = os.getenv("BILIRUBIN_MODEL_BACKEND", "tflite" if IS_RASPBERRY_PI else "keras").strip().lower()
+
+# Active model selection — stored in data/camera_settings.json as "active_model"
+# Falls back to env var BILIRUBIN_MODEL_TYPE, then "v19"
+_ACTIVE_MODEL_OVERRIDE = os.getenv("BILIRUBIN_MODEL_TYPE", "").strip().lower()
+
+# ===== Model Registry — scan models/ folder on import =====
+import json as _json
+import re as _re
+import zipfile as _zipfile
+
+
+def _slug(value: str) -> str:
+    text = _re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
+    return text.strip("_") or "model"
+
+
+def _read_tflite_metadata(path: Path) -> dict:
+    try:
+        with _zipfile.ZipFile(path) as zf:
+            if "metadata.json" not in zf.namelist():
+                return {}
+            return _json.loads(zf.read("metadata.json").decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _is_detector_model(path: Path, metadata: dict | None = None) -> bool:
+    metadata = metadata or {}
+    filename = path.name.lower()
+    description = str(metadata.get("description", "")).lower()
+    names = metadata.get("names", {})
+    class_names = " ".join(str(v).lower() for v in names.values()) if isinstance(names, dict) else ""
+    return (
+        metadata.get("task") == "detect"
+        or "yolo" in filename
+        or "ultralytics" in description
+        or "skin_roi" in class_names
+    )
+
+
+def _model_id_for_file(path: Path) -> str:
+    stem = path.stem.lower()
+    if stem == "best_cnn_bilirubin_v19":
+        return "v19"
+    if stem.startswith("best_cnn_bilirubin_v19"):
+        suffix = _slug(stem.replace("best_cnn_bilirubin_v19", ""))
+        return f"v19_{suffix}" if suffix else "v19"
+    if stem == "best_model_stage1":
+        return "stage1"
+    if stem == "best_model_stage2":
+        return "stage2"
+    if "v18" in stem and "fp16" in stem:
+        return "v18_fp16"
+    return _slug(stem)
+
+
+def _display_name_for_file(path: Path, model_id: str) -> str:
+    if model_id == "v19":
+        return "Final - best_cnn_bilirubin_v19.h5"
+    return path.name
+
+
+def _scan_models():
+    """Scan models/ for selectable bilirubin regressors. Detector models are hidden."""
+    results = []
+    seen_ids = set()
+    if not MODELS_DIR.exists():
+        return results
+
+    for path in sorted(MODELS_DIR.iterdir(), key=lambda p: p.name.lower()):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in {".h5", ".keras", ".tflite"}:
+            continue
+
+        metadata = _read_tflite_metadata(path) if suffix == ".tflite" else {}
+        if _is_detector_model(path, metadata):
+            continue
+
+        base_id = _model_id_for_file(path)
+        model_id = base_id
+        counter = 2
+        while model_id in seen_ids:
+            model_id = f"{base_id}_{counter}"
+            counter += 1
+        seen_ids.add(model_id)
+
+        file_size_mb = path.stat().st_size / (1024 * 1024)
+        model_format = "keras" if suffix in {".h5", ".keras"} else "tflite"
+        results.append({
+            "id": model_id,
+            "model_type": "regressor",
+            "name": _display_name_for_file(path, model_id),
+            "path": str(path.resolve()),
+            "format": model_format,
+            "size_mb": round(file_size_mb, 1),
+            "filename": path.name,
+            "preprocess_profile": "yolo_wb_skin_crop",
+        })
+    return results
+
+
+AVAILABLE_MODELS = _scan_helpers = None  # Will be set below
+
+
+def get_available_models():
+    """Return list of available model dicts."""
+    return _scan_models()
+
+
+def get_model_by_id(model_id: str | None):
+    """Return a selectable model dict by id, or None."""
+    if not model_id:
+        return None
+    key = str(model_id).strip().lower()
+    return next((m for m in get_available_models() if m["id"] == key), None)
 _LEGACY_USE_STAGE2 = _env_bool("BILIRUBIN_USE_STAGE2", True)
 _LEGACY_MODEL_MODE = "stage2" if _LEGACY_USE_STAGE2 else "stage1"
 MODEL_MODE = _normalize_model_mode(os.getenv("BILIRUBIN_MODEL_MODE"), _LEGACY_MODEL_MODE)

@@ -21,6 +21,9 @@ const state = {
   cameraStatusTimer: null,
   modelMode: 'stage2',
   useStage2: true,
+  activeModelId: null,
+  activeModelName: null,
+  availableModels: [],
   lastImageB64: null,
   lastImageMeta: null,
   lastPrediction: null,
@@ -469,6 +472,56 @@ function modelModeLabel(mode) {
   return 'Stage 1 + Stage 2';
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function modelRuntimeLabel(modelInfo = {}, fallbackMode = null) {
+  return modelInfo.active_model_name
+    || modelInfo.active_model_id
+    || modelInfo.name
+    || modelInfo.id
+    || modelModeLabel(fallbackMode);
+}
+
+function formatModelMeta(model) {
+  const parts = [];
+  if (model?.filename) parts.push(model.filename);
+  if (model?.format) parts.push(String(model.format).toUpperCase());
+  if (model?.size_mb != null) parts.push(`${Number(model.size_mb).toFixed(1)} MB`);
+  return parts.join(' · ');
+}
+
+function renderModelOptions(models, activeModelId) {
+  const list = document.getElementById('model-list');
+  if (!list) return;
+  if (!models?.length) {
+    list.innerHTML = '<div class="empty-state">Tidak ada model regresi di folder models.</div>';
+    return;
+  }
+
+  list.innerHTML = models.map((model, index) => {
+    const checked = model.id === activeModelId || (!activeModelId && index === 0);
+    const meta = formatModelMeta(model);
+    return `
+      <label class="radio-opt card" style="display:flex; gap:0; margin-top:${index === 0 ? 0 : 8}px">
+        <div style="width:5px; background:var(--accent-lt); border-radius:10px 0 0 10px; flex-shrink:0"></div>
+        <div style="display:flex; align-items:center; gap:12px; padding:14px; min-width:0; flex:1">
+          <input type="radio" name="model-id" value="${escapeHtml(model.id)}" ${checked ? 'checked' : ''} style="accent-color:var(--accent); width:18px; height:18px; flex-shrink:0">
+          <div style="min-width:0">
+            <div style="font-size:14px; color:var(--text); overflow-wrap:anywhere">${escapeHtml(model.name || model.id)}</div>
+            <div style="font-size:12px; color:var(--text-sub); margin-top:3px; overflow-wrap:anywhere">${escapeHtml(meta)}</div>
+          </div>
+        </div>
+      </label>`;
+  }).join('');
+}
+
 function saveModelMode(mode) {
   try {
     localStorage.setItem('bilirubin.modelMode', normalizeModelMode(mode));
@@ -826,9 +879,9 @@ const App = {
             title: 'MODEL',
             rows: [
               ['Backend',   mdl.model_backend ?? runtime.model_backend ?? '?'],
-              ['Stage 1',   mdl.stage1_loaded ? 'Dimuat ✓' : 'Tidak tersedia'],
-              ['Stage 2',   mdl.stage2_loaded ? 'Dimuat ✓' : 'Tidak tersedia'],
-              ['Digunakan', modelModeLabel(mdl.model_mode ?? runtime.model_mode)],
+              ['File',      mdl.active_model_path ? String(mdl.active_model_path).split(/[\\/]/).pop() : '-'],
+              ['Preprocess', mdl.preprocess_profile ?? '-'],
+              ['Digunakan', modelRuntimeLabel(mdl, runtime.model_mode)],
               ['Latency',   mdl.last_inference_time_ms != null ? `${mdl.last_inference_time_ms} ms` : '-'],
             ],
           },
@@ -1080,33 +1133,52 @@ const App = {
 
   // ── Model select ──────────────────────────────────────────────────────────
   goModelSelect() {
-    showScreen('screen-model', () => {
-      const selected = document.querySelector(`input[name="model-mode"][value="${state.modelMode}"]`);
-      if (selected) selected.checked = true;
+    showScreen('screen-model', async () => {
+      const list = document.getElementById('model-list');
       const msg = document.getElementById('model-msg');
       msg.style.color = 'var(--ok)';
       msg.textContent = '';
+      if (list) list.innerHTML = '<div class="empty-state">Memuat daftar model...</div>';
+      try {
+        const r = await apiGet('/api/settings/model-type');
+        if (!r?.success) throw new Error(r?.error || 'Gagal memuat model');
+        state.availableModels = r.available || [];
+        state.activeModelId = r.active_model_id || r.active_model?.id || null;
+        state.activeModelName = r.active_model?.name || state.activeModelName;
+        renderModelOptions(state.availableModels, state.activeModelId);
+      } catch (err) {
+        if (list) list.innerHTML = '<div class="empty-state">Gagal memuat daftar model.</div>';
+        msg.style.color = 'var(--err)';
+        msg.textContent = err?.message || 'Gagal memuat daftar model';
+      }
     });
   },
 
   async applyModelSettings() {
-    const selected = document.querySelector('input[name="model-mode"]:checked');
-    const modelMode = normalizeModelMode(selected?.value);
+    const selected = document.querySelector('input[name="model-id"]:checked');
+    const modelId = selected?.value;
     const msg = document.getElementById('model-msg');
+    if (!modelId) {
+      msg.style.color = 'var(--err)';
+      msg.textContent = 'Pilih model terlebih dahulu';
+      return;
+    }
     try {
-      const r = await apiPost('/api/settings/model', { model_mode: modelMode });
+      msg.style.color = 'var(--text-sub)';
+      msg.textContent = 'Memuat model...';
+      const r = await apiPost('/api/settings/model-type', { model_id: modelId });
       if (r.success) {
-        applyModelModeState(r.model_mode || modelMode);
-        saveModelMode(state.modelMode);
+        state.activeModelId = r.active_model_id || modelId;
+        state.activeModelName = r.model?.name || state.activeModelName;
         msg.style.color = 'var(--ok)';
-        msg.textContent = `✓ Mode inferensi: ${modelModeLabel(state.modelMode)}`;
+        msg.textContent = `Model aktif: ${state.activeModelName || state.activeModelId}`;
       } else {
         msg.style.color = 'var(--err)';
-        msg.textContent = r.error || '✗ Gagal menerapkan pengaturan';
+        msg.textContent = r.error || 'Gagal menerapkan pengaturan';
       }
     } catch {
       msg.style.color = 'var(--err)';
-      msg.textContent = '✗ Gagal menghubungi server';
+      msg.textContent = 'Gagal menghubungi server';
     }
   },
 
@@ -1269,7 +1341,7 @@ function renderCaptureResult(result) {
     : '-';
   const mode = result?.preprocessing_mode ?? '-';
   const palette = result?.palette_detected ? 'Terdeteksi' : 'Tidak terdeteksi';
-  const inference = `${result?.model_backend ?? '?'} / ${modelModeLabel(result?.model_mode || result?.model_used)}`;
+  const inference = `${result?.model_backend ?? '?'} / ${result?.active_model_name || result?.active_model_id || modelModeLabel(result?.model_mode || result?.model_used)}`;
   const latency = result?.inference_time_ms != null ? `${Number(result.inference_time_ms).toFixed(1)} ms` : '-';
   const attempt = result?.capture_attempts
     ? `${result.capture_attempt ?? 1}/${result.capture_attempts}`
@@ -1402,13 +1474,8 @@ async function waitForServer() {
         state.previewStatusMs = Math.max(DEFAULT_PREVIEW_STATUS_MS, runtime.preview_poll_ms ?? DEFAULT_PREVIEW_STATUS_MS);
         applyModelModeState(models.model_mode ?? runtime.model_mode ?? (runtime.use_stage2 ? 'stage2' : 'stage1'));
 
-        const savedModelMode = loadSavedModelMode();
-        if (savedModelMode && normalizeModelMode(savedModelMode) !== state.modelMode) {
-          const modelResp = await apiPost('/api/settings/model', { model_mode: normalizeModelMode(savedModelMode) });
-          if (modelResp?.success) {
-            applyModelModeState(modelResp.model_mode || savedModelMode);
-          }
-        }
+        state.activeModelId = models.active_model_id ?? runtime.active_model_id ?? null;
+        state.activeModelName = models.active_model_name ?? runtime.active_model_name ?? null;
         statusEl.textContent = '✓ Terhubung!';
         await loadBabies();
         await loadSyncStatus();
