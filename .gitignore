@@ -18,6 +18,7 @@ data/offline_sync.db-*
 .env.*
 !.env.example
 .hermes
+.lin
 
 # Python
 __pycache__/

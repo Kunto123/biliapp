@@ -397,13 +397,32 @@ QUALITY_SCORE_HIGH = 75  # >=75 is "high" quality
 QUALITY_SCORE_MEDIUM = 50  # >=50 is "medium" quality
 QUALITY_SCORE_LOW = 0   # <50 is "low" quality
 
-# ===== GATECHECK SETTINGS =====
+# ===== GATECHECK SETTINGS (card-alignment flow) =====
 GATECHECK_REQUIRE_PALETTE = _env_bool("BILIRUBIN_REQUIRE_PALETTE", True)
 GATECHECK_MIN_GRAY_PATCHES = _env_int("BILIRUBIN_MIN_GRAY_PATCHES", 2)
 GATECHECK_MIN_COLOR_PATCHES = _env_int("BILIRUBIN_MIN_COLOR_PATCHES", 4)
 GATECHECK_MIN_BLUR_SCORE = _env_float("BILIRUBIN_MIN_BLUR_SCORE", 60.0)
 GATECHECK_MAX_RAW_PALETTE_MAE = _env_float("BILIRUBIN_MAX_RAW_PALETTE_MAE", 95.0)
 GATECHECK_MIN_CHECKERBOARD_SCORE = _env_float("BILIRUBIN_MIN_CHECKERBOARD_SCORE", 35.0)
+
+# ===== GATECHECK SETTINGS (YOLO flow) =====
+# Gray patches: if True, reject when YOLO finds no grey patches (no gray-world fallback).
+YOLO_REQUIRE_GRAY_PATCHES    = _env_bool("BILIRUBIN_YOLO_REQUIRE_GRAY_PATCHES", True)
+# Skin ROI area as fraction of image area [0-1].
+YOLO_SKIN_ROI_MIN_AREA_RATIO = _env_float("BILIRUBIN_YOLO_SKIN_ROI_MIN_AREA_RATIO", 0.05)
+YOLO_SKIN_ROI_MAX_AREA_RATIO = _env_float("BILIRUBIN_YOLO_SKIN_ROI_MAX_AREA_RATIO", 0.75)
+# Skin ROI width/height aspect ratio limits.
+YOLO_SKIN_ROI_MIN_ASPECT     = _env_float("BILIRUBIN_YOLO_SKIN_ROI_MIN_ASPECT", 0.3)
+YOLO_SKIN_ROI_MAX_ASPECT     = _env_float("BILIRUBIN_YOLO_SKIN_ROI_MAX_ASPECT", 3.5)
+# Minimum pixel distance from any image edge.
+YOLO_SKIN_ROI_EDGE_MARGIN    = _env_int("BILIRUBIN_YOLO_SKIN_ROI_EDGE_MARGIN", 3)
+# Blur (Laplacian variance) on skin crop. Lower than card-alignment (60) because
+# the skin crop is a sub-region and compressed images score lower. For RPi captures
+# at full resolution, real motion-blur is typically < 20. Set higher in .env if needed.
+YOLO_SKIN_ROI_MIN_BLUR       = _env_float("BILIRUBIN_YOLO_SKIN_ROI_MIN_BLUR", 30.0)
+# HSV-V (brightness) range on skin crop — same range as card-alignment flow.
+YOLO_SKIN_ROI_EXPOSURE_MIN   = _env_float("BILIRUBIN_YOLO_SKIN_ROI_EXPOSURE_MIN", 70.0)
+YOLO_SKIN_ROI_EXPOSURE_MAX   = _env_float("BILIRUBIN_YOLO_SKIN_ROI_EXPOSURE_MAX", 225.0)
 
 # ===== INFERENCE SETTINGS =====
 ENABLE_INFERENCE_TIME_LOGGING = True  # Log inference latency

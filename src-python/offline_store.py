@@ -189,7 +189,7 @@ class OfflineStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM babies WHERE baby_id = ?",
-                (int(baby_id),),
+                (str(baby_id),),
             ).fetchone()
             return _row_to_dict(row)
 

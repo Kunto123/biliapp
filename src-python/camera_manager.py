@@ -257,11 +257,13 @@ class CameraPreviewStream:
                 cap.release()
             except Exception:
                 pass
-            if os.name == "nt":
-                time.sleep(0.15)
 
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=1.2)
+
+        # Always wait after stopping preview: V4L2/MSMF needs time to fully release
+        # the device before a new capture can open it without getting black frames.
+        time.sleep(0.35 if os.name != "nt" else 0.5)
 
         self._thread = None
         self._process = None
@@ -761,8 +763,12 @@ class CameraManager:
                 time.sleep(0.15)
                 continue
             try:
-                # Discard stale frames from the internal pipeline after preview handoff.
-                for _ in range(4):
+                # Discard frames until AE/AWB stabilises.
+                # At 4K (~5 fps) 600 ms = only 3 frames — not enough for AE to
+                # reconverge from a prior preview session to a flash-lit scene.
+                # 1 s gives ~5-30 frames depending on resolution/fps.
+                warmup_deadline = time.monotonic() + 1.0
+                while time.monotonic() < warmup_deadline:
                     cap.grab()
                 ret, frame = cap.read()
                 if not ret:

@@ -38,6 +38,15 @@ try:
         GATECHECK_MIN_BLUR_SCORE,
         GATECHECK_MAX_RAW_PALETTE_MAE,
         GATECHECK_MIN_CHECKERBOARD_SCORE,
+        YOLO_REQUIRE_GRAY_PATCHES,
+        YOLO_SKIN_ROI_MIN_AREA_RATIO,
+        YOLO_SKIN_ROI_MAX_AREA_RATIO,
+        YOLO_SKIN_ROI_MIN_ASPECT,
+        YOLO_SKIN_ROI_MAX_ASPECT,
+        YOLO_SKIN_ROI_EDGE_MARGIN,
+        YOLO_SKIN_ROI_MIN_BLUR,
+        YOLO_SKIN_ROI_EXPOSURE_MIN,
+        YOLO_SKIN_ROI_EXPOSURE_MAX,
     )
 except Exception:
     from data_artifacts import (
@@ -48,7 +57,16 @@ except Exception:
         GATECHECK_MIN_CHECKERBOARD_SCORE,
     )
 
-    GATECHECK_REQUIRE_PALETTE = True
+    GATECHECK_REQUIRE_PALETTE    = True
+    YOLO_REQUIRE_GRAY_PATCHES    = True
+    YOLO_SKIN_ROI_MIN_AREA_RATIO = 0.05
+    YOLO_SKIN_ROI_MAX_AREA_RATIO = 0.75
+    YOLO_SKIN_ROI_MIN_ASPECT     = 0.3
+    YOLO_SKIN_ROI_MAX_ASPECT     = 3.5
+    YOLO_SKIN_ROI_EDGE_MARGIN    = 3
+    YOLO_SKIN_ROI_MIN_BLUR       = 30.0
+    YOLO_SKIN_ROI_EXPOSURE_MIN   = 70.0
+    YOLO_SKIN_ROI_EXPOSURE_MAX   = 225.0
 
 
 # ===== CARD DETECTION & PERSPECTIVE ALIGNMENT =====
@@ -805,6 +823,9 @@ class BilirubinPreprocessor:
                 return fail("yolo_unavailable", self.last_error or "YOLO detector unavailable")
 
             image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            img_h, img_w = image_rgb.shape[:2]
+            img_area = img_h * img_w
+
             detections = detector.detect(image_rgb)
             if not detections:
                 return fail("yolo_no_detection", detector.last_error or "YOLO detector found no usable ROI")
@@ -814,34 +835,96 @@ class BilirubinPreprocessor:
                 return fail("skin_roi_not_detected", "YOLO skin_roi tidak terdeteksi")
             skin = max(skin_detections, key=lambda item: item["confidence"])
 
+            # --- Validasi geometri skin_roi (poin 2) ---
+            sx1, sy1, sx2, sy2 = skin["box"]
+            roi_w = sx2 - sx1
+            roi_h = sy2 - sy1
+            roi_area_ratio = (roi_w * roi_h) / img_area if img_area > 0 else 0.0
+            roi_aspect = roi_w / roi_h if roi_h > 0 else 0.0
+
+            if roi_area_ratio < YOLO_SKIN_ROI_MIN_AREA_RATIO:
+                return fail(
+                    "skin_roi_too_small",
+                    f"skin_roi terlalu kecil: area_ratio={roi_area_ratio:.3f} "
+                    f"(min {YOLO_SKIN_ROI_MIN_AREA_RATIO})",
+                )
+            if roi_area_ratio > YOLO_SKIN_ROI_MAX_AREA_RATIO:
+                return fail(
+                    "skin_roi_too_large",
+                    f"skin_roi terlalu besar: area_ratio={roi_area_ratio:.3f} "
+                    f"(max {YOLO_SKIN_ROI_MAX_AREA_RATIO})",
+                )
+            if not (YOLO_SKIN_ROI_MIN_ASPECT <= roi_aspect <= YOLO_SKIN_ROI_MAX_ASPECT):
+                return fail(
+                    "skin_roi_bad_aspect",
+                    f"skin_roi aspect ratio tidak wajar: {roi_aspect:.2f} "
+                    f"(range {YOLO_SKIN_ROI_MIN_ASPECT}-{YOLO_SKIN_ROI_MAX_ASPECT})",
+                )
+            m = YOLO_SKIN_ROI_EDGE_MARGIN
+            if sx1 < m or sy1 < m or sx2 > img_w - m or sy2 > img_h - m:
+                return fail(
+                    "skin_roi_at_edge",
+                    f"skin_roi terlalu dekat tepi gambar (margin={m}px): "
+                    f"box=[{sx1},{sy1},{sx2},{sy2}] image={img_w}x{img_h}",
+                )
+
+            # --- Gray patches ---
             gray_detections = [
                 d for d in detections
                 if "grey" in d["name"].lower() or "gray" in d["name"].lower()
             ]
             gray_patches = []
             for det in gray_detections:
-                x1, y1, x2, y2 = det["box"]
-                patch = image_rgb[y1:y2, x1:x2]
+                gx1, gy1, gx2, gy2 = det["box"]
+                patch = image_rgb[gy1:gy2, gx1:gx2]
                 if patch.size > 0:
                     gray_patches.append(np.mean(patch, axis=(0, 1)))
 
+            # --- Require gray patches (poin 3) ---
             gatecheck_warnings: List[str] = []
-            if gray_patches:
-                wb_rgb = white_balance_from_gray_patch_means(image_rgb, gray_patches)
-                mode = "yolo_wb_skin_crop"
-                quality_label = "high"
-                quality_score = 100
-            else:
+            if not gray_patches:
+                if YOLO_REQUIRE_GRAY_PATCHES:
+                    return fail(
+                        "gray_patches_not_detected",
+                        "Gray patch tidak terdeteksi oleh YOLO. "
+                        "Pastikan kartu kalibrasi terlihat jelas.",
+                    )
                 wb_rgb = gray_world_white_balance(image_rgb)
                 mode = "yolo_grayworld_skin_crop"
                 quality_label = "medium"
                 quality_score = 75
-                gatecheck_warnings.append("Gray patch YOLO tidak terdeteksi; memakai gray-world fallback.")
+                gatecheck_warnings.append(
+                    "Gray patch YOLO tidak terdeteksi; memakai gray-world fallback."
+                )
+            else:
+                wb_rgb = white_balance_from_gray_patch_means(image_rgb, gray_patches)
+                mode = "yolo_wb_skin_crop"
+                quality_label = "high"
+                quality_score = 100
 
-            x1, y1, x2, y2 = skin["box"]
-            skin_crop = wb_rgb[y1:y2, x1:x2]
+            # --- Crop skin ROI dari gambar yang sudah di-white-balance ---
+            skin_crop = wb_rgb[sy1:sy2, sx1:sx2]
             if skin_crop.size == 0:
                 return fail("skin_roi_empty", "YOLO skin_roi kosong setelah crop")
+
+            # --- Gatecheck blur pada skin crop (poin 4) ---
+            blur = blur_score_laplacian(skin_crop)
+            if blur < YOLO_SKIN_ROI_MIN_BLUR:
+                return fail(
+                    "skin_roi_blur",
+                    f"Skin crop terlalu blur: laplacian={blur:.1f} "
+                    f"(min {YOLO_SKIN_ROI_MIN_BLUR})",
+                )
+
+            # --- Gatecheck exposure pada skin crop (poin 4) ---
+            skin_hsv = cv2.cvtColor(skin_crop, cv2.COLOR_RGB2HSV)
+            v_median = float(np.median(skin_hsv[:, :, 2]))
+            if not (YOLO_SKIN_ROI_EXPOSURE_MIN <= v_median <= YOLO_SKIN_ROI_EXPOSURE_MAX):
+                return fail(
+                    "skin_roi_exposure",
+                    f"Skin crop exposure di luar range: V_median={v_median:.0f} "
+                    f"(range {YOLO_SKIN_ROI_EXPOSURE_MIN:.0f}-{YOLO_SKIN_ROI_EXPOSURE_MAX:.0f})",
+                )
 
             diagnostics.update({
                 "selected_mode": mode,
@@ -852,14 +935,23 @@ class BilirubinPreprocessor:
                 "quality_flags": {
                     "yolo_detector_loaded": True,
                     "skin_roi_detected": True,
+                    "skin_roi_size_ok": True,
+                    "skin_roi_aspect_ok": True,
+                    "skin_roi_placement_ok": True,
                     "gray_patches_detected": bool(gray_patches),
+                    "skin_blur_ok": True,
+                    "skin_exposure_ok": True,
                     "white_balance_only": True,
                     "palette_correction_used": False,
                 },
                 "metrics": {
                     "skin_roi_confidence": float(skin["confidence"]),
+                    "skin_roi_area_ratio": round(roi_area_ratio, 4),
+                    "skin_roi_aspect": round(roi_aspect, 3),
                     "gray_patch_count": int(len(gray_patches)),
                     "detections": int(len(detections)),
+                    "skin_blur_score": round(blur, 2),
+                    "skin_v_median": round(v_median, 1),
                 },
                 "skin_roi_box": skin["box"],
                 "gray_patch_boxes": [d["box"] for d in gray_detections],

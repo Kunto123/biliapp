@@ -515,6 +515,12 @@ class BilirubinPredictor:
 
             self.last_inference_time_ms = round((time.perf_counter() - started) * 1000.0, 2)
 
+            import math as _math
+            if _math.isnan(bilirubin_prediction) or _math.isinf(bilirubin_prediction):
+                raise ValueError(
+                    f"Model menghasilkan nilai tidak valid (NaN/Inf). "
+                    "Periksa model atau gambar input."
+                )
             if not (0.0 <= bilirubin_prediction <= 30.0):
                 raise ValueError(
                     f"Prediksi di luar rentang valid: {bilirubin_prediction:.2f} mg/dL. "
